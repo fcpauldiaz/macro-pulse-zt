@@ -1,0 +1,10 @@
+.env
+.pulse_session.json
+output/
+__pycache__/
+*.pyc
+.venv/
+venv/
+local.db
+dashboard/node_modules/
+dashboard/.next/
