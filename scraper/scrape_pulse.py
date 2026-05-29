@@ -14,7 +14,14 @@ from scraper.clerk_login import (
     load_session_cookies,
     login_and_save_session,
 )
-from scraper.pulse_client import PulseClient, PulseDataError, extract_symbols, fetch_pulse_data
+from scraper.pulse_client import (
+    PulseClient,
+    PulseDataError,
+    extract_signal_table,
+    extract_symbols,
+    fetch_pulse_data,
+    get_regime,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -109,6 +116,34 @@ def _parse_args() -> argparse.Namespace:
         help="Subscriber password for refresh login",
     )
 
+    signals_parser = subparsers.add_parser(
+        "signals",
+        help="Export Señales table rows (Growth / Momentum / Quant Score)",
+    )
+    signals_parser.add_argument(
+        "--tab",
+        choices=["growth", "momentum", "quantScore", "all"],
+        default="momentum",
+        help="Dashboard tab to export (default: momentum)",
+    )
+    signals_parser.add_argument(
+        "--ready-to-buy",
+        action="store_true",
+        help="Apply Ready to Buy filter (Momentum + Quant Score tabs)",
+    )
+    signals_parser.add_argument(
+        "--format",
+        choices=["json", "csv"],
+        default="json",
+        help="Output format",
+    )
+    signals_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output file path",
+    )
+
     return parser.parse_args()
 
 
@@ -192,6 +227,73 @@ def _cmd_charts(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _write_csv(rows: list[dict], output_path: Path) -> None:
+    import csv
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        output_path.write_text("", encoding="utf-8")
+        return
+
+    fieldnames: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
+
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _collect_signal_rows(data: dict, tab: str, ready_to_buy: bool) -> list[dict]:
+    if tab == "all":
+        rows: list[dict] = []
+        rows.extend(extract_signal_table(data, "growth"))
+        rows.extend(extract_signal_table(data, "momentum", ready_to_buy=ready_to_buy))
+        rows.extend(extract_signal_table(data, "quantScore", ready_to_buy=ready_to_buy))
+        return rows
+
+    return extract_signal_table(data, tab, ready_to_buy=ready_to_buy)
+
+
+def _default_signals_output(args: argparse.Namespace) -> Path:
+    suffix = "csv" if args.format == "csv" else "json"
+    if args.tab == "all":
+        name = f"signals_all.{suffix}"
+    elif args.tab == "momentum" and args.ready_to_buy:
+        name = f"signals_momentum_ready_to_buy.{suffix}"
+    else:
+        name = f"signals_{args.tab}.{suffix}"
+    return args.output_dir / name
+
+
+def _cmd_signals(args: argparse.Namespace) -> int:
+    data = fetch_pulse_data(base_url=args.base_url)
+    rows = _collect_signal_rows(data, args.tab, args.ready_to_buy)
+    output_path = args.output or _default_signals_output(args)
+
+    if args.format == "csv":
+        _write_csv(rows, output_path)
+    else:
+        payload = {
+            "regime": get_regime(data),
+            "tab": args.tab,
+            "readyToBuy": args.ready_to_buy,
+            "count": len(rows),
+            "updatedAt": data.get("updatedAt"),
+            "rows": rows,
+        }
+        _write_data(payload, output_path)
+
+    print(f"Saved {len(rows)} rows to {output_path}")
+    print(f"regime={get_regime(data)} tab={args.tab} readyToBuy={args.ready_to_buy}")
+    return 0
+
 def _cmd_all(args: argparse.Namespace) -> int:
     data, charts = _fetch_charts(args)
 
@@ -219,6 +321,8 @@ def main() -> int:
             return _cmd_charts(args)
         if args.command == "all":
             return _cmd_all(args)
+        if args.command == "signals":
+            return _cmd_signals(args)
     except (PulseDataError, ClerkLoginError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

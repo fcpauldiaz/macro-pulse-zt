@@ -11,6 +11,16 @@ BASE_URL = "https://macro-wrap.vercel.app"
 PULSE_DATA_PATH = "/api/pulse/data"
 PULSE_CHART_PATH = "/api/pulse/chart"
 
+REGIME_ETF_WEIGHTS: dict[str, dict[str, float]] = {
+    "Early Contraction": {"XLE": 0.4, "XLF": 0.14, "XLI": 0.1754, "XLK": 0.2846},
+    "Early Expansion": {"XLP": 0.2306, "XLV": 0.1408, "XLB": 0.3809, "XLU": 0.2476},
+    "Late Contraction": {"XLP": 0.2723, "XLV": 0.1511, "XLK": 0.1766, "XLU": 0.4},
+    "Late Expansion": {"XLP": 0.1944, "XLE": 0.1652, "XLV": 0.3621, "XLK": 0.2783},
+    "Mid Expansion": {"XLY": 0.2938, "XLI": 0.3438, "XLB": 0.1562, "XLU": 0.2062},
+}
+
+SignalTab = str
+
 REQUIRED_TOP_LEVEL_KEYS = frozenset(
     {
         "current",
@@ -91,7 +101,116 @@ def validate_pulse_data(payload: dict[str, Any]) -> PulseData:
     return payload  # type: ignore[return-value]
 
 
+def get_regime(data: PulseData) -> str:
+    current = data.get("current") or {}
+    regime = current.get("regime")
+    if isinstance(regime, str) and regime:
+        return regime
+    return "Mid Expansion"
+
+
+def get_regime_etfs(data: PulseData) -> list[str]:
+    regime = get_regime(data)
+    weights = REGIME_ETF_WEIGHTS.get(regime, REGIME_ETF_WEIGHTS["Mid Expansion"])
+    return [etf for etf, _ in sorted(weights.items(), key=lambda item: item[1], reverse=True)]
+
+
+def extract_growth_rows(data: PulseData) -> list[dict[str, Any]]:
+    stocks_by_etf = data.get("stocksByEtf") or {}
+    rows: list[dict[str, Any]] = []
+
+    for etf in get_regime_etfs(data):
+        for stock in stocks_by_etf.get(etf, []):
+            if not isinstance(stock, dict):
+                continue
+            rows.append(
+                {
+                    "tab": "growth",
+                    "symbol": stock.get("symbol"),
+                    "etf": etf,
+                    "beta": stock.get("beta"),
+                    "growthScore": stock.get("Score_Final"),
+                    "sector": stock.get("sector"),
+                    "industry": stock.get("industry"),
+                }
+            )
+
+    return rows
+
+
+def extract_momentum_rows(data: PulseData, *, ready_to_buy: bool) -> list[dict[str, Any]]:
+    source_key = "momentumReadySignals" if ready_to_buy else "momentumCandidates"
+    source = data.get(source_key) or []
+
+    rows: list[dict[str, Any]] = []
+    for stock in source:
+        if not isinstance(stock, dict):
+            continue
+        rows.append(
+            {
+                "tab": "momentum",
+                "readyToBuy": ready_to_buy,
+                "symbol": stock.get("symbol"),
+                "etf": stock.get("etf"),
+                "price": stock.get("price"),
+                "sma50": stock.get("sma50"),
+                "beta": stock.get("beta"),
+                "signal": stock.get("signal"),
+            }
+        )
+
+    return rows
+
+
+def extract_quant_score_rows(data: PulseData, *, ready_to_buy: bool) -> list[dict[str, Any]]:
+    allowed_etfs = set(get_regime_etfs(data))
+    rows: list[dict[str, Any]] = []
+
+    for stock in data.get("quantScoreSignals") or []:
+        if not isinstance(stock, dict):
+            continue
+        etf = stock.get("etf")
+        if etf not in allowed_etfs:
+            continue
+        if ready_to_buy and not stock.get("readyToBuy"):
+            continue
+
+        rows.append(
+            {
+                "tab": "quantScore",
+                "readyToBuy": bool(stock.get("readyToBuy")),
+                "symbol": stock.get("symbol"),
+                "etf": etf,
+                "price": stock.get("price"),
+                "beta": stock.get("beta"),
+                "quantScore": stock.get("quantScore"),
+                "rsi": stock.get("rsi"),
+                "sector": stock.get("sector"),
+                "industry": stock.get("industry"),
+            }
+        )
+
+    return rows
+
+
+def extract_signal_table(
+    data: PulseData,
+    tab: SignalTab,
+    *,
+    ready_to_buy: bool = False,
+) -> list[dict[str, Any]]:
+    if tab == "growth":
+        return extract_growth_rows(data)
+    if tab == "momentum":
+        return extract_momentum_rows(data, ready_to_buy=ready_to_buy)
+    if tab == "quantScore":
+        return extract_quant_score_rows(data, ready_to_buy=ready_to_buy)
+
+    raise PulseDataError(f"Unsupported tab '{tab}'. Use growth, momentum, or quantScore.")
+
+
 def extract_symbols(data: PulseData) -> list[str]:
+
     symbols: set[str] = set()
 
     for signal_list in ("momentumSignals", "momentumReadySignals", "quantScoreSignals"):
