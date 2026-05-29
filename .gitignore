@@ -1,0 +1,7 @@
+.env
+.pulse_session.json
+output/
+__pycache__/
+*.pyc
+.venv/
+venv/
