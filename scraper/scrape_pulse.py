@@ -14,6 +14,7 @@ from scraper.clerk_login import (
     load_session_cookies,
     login_and_save_session,
 )
+from scraper.turso_store import SyncResult, TursoStoreError, sync_ready_to_buy_signals
 from scraper.pulse_client import (
     PulseClient,
     PulseDataError,
@@ -144,6 +145,16 @@ def _parse_args() -> argparse.Namespace:
         help="Output file path",
     )
 
+    sync_parser = subparsers.add_parser(
+        "sync",
+        help="Sync momentum + quant ready-to-buy signals into Turso/libSQL",
+    )
+    sync_parser.add_argument(
+        "--date",
+        default=None,
+        help="Snapshot date (YYYY-MM-DD). Defaults to today.",
+    )
+
     return parser.parse_args()
 
 
@@ -272,6 +283,18 @@ def _default_signals_output(args: argparse.Namespace) -> Path:
     return args.output_dir / name
 
 
+def _cmd_sync(args: argparse.Namespace) -> int:
+    result = sync_ready_to_buy_signals(snapshot_date=args.date)
+    print(
+        "Synced "
+        f"{result.snapshot_date} regime={result.regime} "
+        f"momentum={result.momentum_count} quant={result.quant_count} "
+        f"opened={result.opened_positions} updated={result.updated_positions} "
+        f"closed={result.closed_positions}"
+    )
+    return 0
+
+
 def _cmd_signals(args: argparse.Namespace) -> int:
     data = fetch_pulse_data(base_url=args.base_url)
     rows = _collect_signal_rows(data, args.tab, args.ready_to_buy)
@@ -323,7 +346,9 @@ def main() -> int:
             return _cmd_all(args)
         if args.command == "signals":
             return _cmd_signals(args)
-    except (PulseDataError, ClerkLoginError) as exc:
+        if args.command == "sync":
+            return _cmd_sync(args)
+    except (PulseDataError, ClerkLoginError, TursoStoreError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

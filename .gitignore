@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+local.db
+dashboard/node_modules/
+dashboard/.next/
