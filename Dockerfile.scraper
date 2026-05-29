@@ -1,0 +1,22 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bash \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-scraper.txt .
+RUN pip install --no-cache-dir -r requirements-scraper.txt
+
+COPY scraper/ ./scraper/
+COPY db/ ./db/
+COPY scripts/daily-sync.sh ./scripts/daily-sync.sh
+
+RUN chmod +x ./scripts/daily-sync.sh
+
+CMD ["/bin/bash", "./scripts/daily-sync.sh"]
