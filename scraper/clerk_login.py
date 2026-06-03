@@ -18,6 +18,7 @@ from scraper.disposable_inbox import (
     supports_auto_email_code,
 )
 from scraper.errors import ClerkLoginError
+from scraper.browser_stealth import launch_stealth_browser
 from scraper.mail_tm_browser import (
     open_mail_tm,
     read_email_address,
@@ -450,23 +451,11 @@ def _fetch_email_code_from_mail_tm(mail_page: Page) -> str:
 
 
 def _launch_browser(playwright, *, headless: bool, storage_state: Path | None = None):
-    browser = playwright.chromium.launch(
+    return launch_stealth_browser(
+        playwright,
         headless=headless,
-        args=["--disable-blink-features=AutomationControlled"],
+        storage_state=storage_state,
     )
-    context_options = {
-        "user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "viewport": {"width": 1280, "height": 720},
-        "locale": "en-US",
-    }
-    if storage_state and storage_state.exists():
-        context = browser.new_context(storage_state=str(storage_state), **context_options)
-    else:
-        context = browser.new_context(**context_options)
-    return browser, context
 
 
 def _resolve_mail_tm_credentials(
