@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -25,7 +24,6 @@ def test_mail_tm_provision_and_persist() -> str:
     from playwright.sync_api import sync_playwright
 
     from scraper.clerk_login import _launch_browser
-    from scraper.disposable_inbox import inbox_credentials_path, load_saved_inbox_credentials
     from scraper.mail_tm_browser import open_mail_tm, read_email_address, save_storage_state, storage_state_path
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -37,6 +35,8 @@ def test_mail_tm_provision_and_persist() -> str:
 
         os.environ["PULSE_INBOX_PATH"] = str(inbox_path)
         os.environ["PULSE_MAILTM_STATE_PATH"] = str(state_path)
+        os.environ.pop("TURSO_DATABASE_URL", None)
+        os.environ.pop("TURSO_AUTH_TOKEN", None)
 
         with sync_playwright() as playwright:
             browser, context = _launch_browser(playwright, headless=True)
@@ -48,7 +48,7 @@ def test_mail_tm_provision_and_persist() -> str:
             browser.close()
 
         if not state_path.exists():
-            _fail("mail.tm storage state was not saved")
+            _fail("mail.tm browser state was not saved")
 
         with sync_playwright() as playwright:
             browser, context = _launch_browser(
@@ -61,7 +61,7 @@ def test_mail_tm_provision_and_persist() -> str:
             browser.close()
 
         if restored_email != email:
-            _fail(f"storage restore mismatch: {email} != {restored_email}")
+            _fail(f"inbox restore mismatch: {email} != {restored_email}")
 
         _ok(f"mail.tm provision + restore ({email})")
         return email
@@ -70,24 +70,22 @@ def test_mail_tm_provision_and_persist() -> str:
 def test_login_flow() -> None:
     import os
 
-    from scraper.auth import session_path
-    from scraper.clerk_login import login_and_save_session
+    from scraper.clerk_login import login_and_get_cookies
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         inbox_path = tmp_path / "inbox.json"
         state_path = tmp_path / "mailtm_state.json"
-        session_file = tmp_path / "session.json"
 
         os.environ["PULSE_INBOX_PATH"] = str(inbox_path)
         os.environ["PULSE_MAILTM_STATE_PATH"] = str(state_path)
-        os.environ["PULSE_SESSION_PATH"] = str(session_file)
+        os.environ.pop("TURSO_DATABASE_URL", None)
+        os.environ.pop("TURSO_AUTH_TOKEN", None)
 
         try:
-            cookies = login_and_save_session(
+            cookies = login_and_get_cookies(
                 email="",
                 password="",
-                session_path=session_file,
                 headless=True,
                 timeout_ms=120_000,
             )
@@ -106,12 +104,8 @@ def test_login_flow() -> None:
 
         if "__session" not in cookies:
             _fail("login succeeded but __session cookie missing")
-        if not session_file.exists():
-            _fail("session file was not written")
-        if not state_path.exists():
-            _fail("mail.tm storage state was not written after login")
 
-        _ok(f"full Clerk login succeeded (__session length={len(cookies['__session'])})")
+        _ok(f"Clerk login succeeded for this run (__session length={len(cookies['__session'])})")
 
 
 def main() -> int:

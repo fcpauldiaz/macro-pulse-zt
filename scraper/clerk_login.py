@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import TypedDict
@@ -28,7 +27,6 @@ from scraper.mail_tm_browser import (
 )
 
 BASE_URL = "https://macro-wrap.vercel.app"
-DEFAULT_SESSION_PATH = Path(".pulse_session.json")
 SIGN_IN_PATH = "/sign-in"
 PULSE_PATH = "/pulse"
 SIGN_UP_URL = "https://macro-wrap.vercel.app/sign-up"
@@ -151,44 +149,18 @@ def _sign_in_url(*, redirect_path: str = PULSE_PATH, base_url: str = BASE_URL) -
     return f"{base_url.rstrip('/')}{SIGN_IN_PATH}?redirect_url={redirect_url}"
 
 
-def _serialize_cookies(cookies: list[StoredCookie]) -> list[StoredCookie]:
-    return [
-        {
-            "name": cookie["name"],
-            "value": cookie["value"],
-            "domain": cookie.get("domain", ""),
-            "path": cookie.get("path", "/"),
-            "expires": cookie.get("expires", -1),
-            "httpOnly": cookie.get("httpOnly", False),
-            "secure": cookie.get("secure", False),
-            "sameSite": cookie.get("sameSite", "Lax"),
-        }
-        for cookie in cookies
-    ]
+def _cookies_from_browser(cookies: list[StoredCookie]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for cookie in cookies:
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if name and value is not None:
+            result[str(name)] = str(value)
 
+    if "__session" not in result:
+        raise ClerkLoginError("Login completed but '__session' cookie was not set")
 
-def save_session_cookies(cookies: list[StoredCookie], session_path: Path) -> None:
-    session_path.parent.mkdir(parents=True, exist_ok=True)
-    session_path.write_text(json.dumps(_serialize_cookies(cookies), indent=2), encoding="utf-8")
-
-
-def load_session_cookies(session_path: Path) -> dict[str, str]:
-    if not session_path.exists():
-        raise ClerkLoginError(f"Session file not found: {session_path}")
-
-    raw = json.loads(session_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, list):
-        raise ClerkLoginError("Session file must contain a JSON array of cookies")
-
-    cookies: dict[str, str] = {}
-    for item in raw:
-        if isinstance(item, dict) and item.get("name") and item.get("value") is not None:
-            cookies[str(item["name"])] = str(item["value"])
-
-    if "__session" not in cookies:
-        raise ClerkLoginError("Session file is missing required '__session' cookie")
-
-    return cookies
+    return result
 
 
 def _wait_for_clerk(page: Page, timeout_ms: int) -> None:
@@ -224,8 +196,7 @@ def _raise_for_clerk_error(result: dict, *, email: str) -> None:
     if code == "form_identifier_not_found" and email:
         raise ClerkLoginError(
             f"No MacroPulse account exists for {email}. "
-            f"Create one at {SIGN_UP_URL} using the email and password logged on first sync, "
-            "or set CLERK_SESSION from a completed browser login."
+            f"Create one at {SIGN_UP_URL} using the email and password logged on first sync."
         )
 
     if code == "form_password_incorrect" and email:
@@ -259,8 +230,7 @@ def _registration_required_error(*, email: str, password: str) -> ClerkLoginErro
         f"2. Register with email: {email}\n"
         f"3. Use password: {password}\n"
         "4. Re-run sync — MFA codes will be read from https://mail.tm/en/ automatically.\n\n"
-        "The inbox is saved to .pulse_inbox.json (and Turso when configured). "
-        "Or set CLERK_SESSION from browser cookies after logging in manually."
+        "The inbox is saved to .pulse_inbox.json (and Turso when configured)."
     )
 
 
@@ -281,8 +251,8 @@ def _complete_auth_result(
             identifier = result.get("safeIdentifier") or email
             raise ClerkLoginError(
                 "Clerk requires an email verification code after password sign-in. "
-                f"Check {identifier} for the code and set PULSE_MFA_CODE, "
-                "or set CLERK_SESSION from a completed browser login for unattended sync."
+                f"Check {identifier} on https://mail.tm/en/ for the code, "
+                "or set PULSE_MFA_CODE for a one-time override."
             )
 
         return _clerk_sign_in_phase2(page, email_code=resolved_code)
@@ -363,7 +333,7 @@ def _resolve_mail_tm_credentials(
 
     if saved and saved.address.lower() != page_email.lower():
         raise ClerkLoginError(
-            f"mail.tm session for {saved.address} was not restored (got {page_email}). "
+            f"mail.tm inbox for {saved.address} was not restored (got {page_email}). "
             f"Ensure {storage_state_path()} persists across restarts, or delete "
             f"{inbox_credentials_path()} and run sync again to create a new inbox."
         )
@@ -390,11 +360,10 @@ def _resolve_mail_tm_credentials(
     return credentials
 
 
-def login_and_save_session(
+def login_and_get_cookies(
     *,
     email: str,
     password: str,
-    session_path: Path = DEFAULT_SESSION_PATH,
     base_url: str = BASE_URL,
     headless: bool = True,
     timeout_ms: int = 90_000,
@@ -475,8 +444,4 @@ def login_and_save_session(
             cookies = context.cookies()
             browser.close()
 
-    if not any(cookie.get("name") == "__session" for cookie in cookies):
-        raise ClerkLoginError("Login completed but '__session' cookie was not set")
-
-    save_session_cookies(cookies, session_path)
-    return load_session_cookies(session_path)
+    return _cookies_from_browser(cookies)
