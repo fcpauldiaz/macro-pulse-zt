@@ -1,16 +1,16 @@
-FROM node:20-bookworm-slim AS dashboard-deps
+FROM node:22-bookworm-slim AS dashboard-deps
 WORKDIR /dashboard
 COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci
 
-FROM node:20-bookworm-slim AS dashboard-builder
+FROM node:22-bookworm-slim AS dashboard-builder
 WORKDIR /dashboard
 COPY --from=dashboard-deps /dashboard/node_modules ./node_modules
 COPY dashboard/ .
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 
 WORKDIR /app
 
