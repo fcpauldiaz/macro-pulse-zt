@@ -54,11 +54,11 @@ def _parse_args() -> argparse.Namespace:
     )
 
     login_parser = subparsers.add_parser("login", help="Sign in with Clerk and save session cookies")
-    login_parser.add_argument("--email", default=None, help="Subscriber email (or PULSE_EMAIL env var)")
+    login_parser.add_argument("--email", default=None, help="Override disposable inbox email")
     login_parser.add_argument(
         "--password",
         default=None,
-        help="Subscriber password (or PULSE_PASSWORD env var)",
+        help="Override MacroPulse login password",
     )
     login_parser.add_argument(
         "--headed",
@@ -155,27 +155,13 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
-    import os
-
     from scraper.auth import resolve_login_credentials
 
-    password = (
-        args.password
-        or os.getenv("PULSE_EMAIL_PASSWORD", "").strip()
-        or os.getenv("PULSE_PASSWORD", "")
-    )
-    if args.email:
-        os.environ["PULSE_EMAIL"] = args.email
-    if password:
-        os.environ["PULSE_EMAIL_PASSWORD"] = password
+    if args.email and args.password:
+        return args.email, args.password
 
-    if args.email:
-        from scraper.disposable_inbox import ensure_inbox_credentials
-
-        inbox = ensure_inbox_credentials()
-        return args.email, inbox.password
-
-    return resolve_login_credentials()
+    email, password = resolve_login_credentials()
+    return args.email or email, args.password or password
 
 
 def _ensure_session(args: argparse.Namespace) -> dict[str, str]:

@@ -210,14 +210,14 @@ def _raise_for_clerk_error(result: dict, *, email: str) -> None:
     if code == "form_identifier_not_found" and email:
         raise ClerkLoginError(
             f"No MacroPulse account exists for {email}. "
-            f"Create one at {SIGN_UP_URL} using this email and PULSE_PASSWORD, "
+            f"Create one at {SIGN_UP_URL} using the email and password logged on first sync, "
             "or set CLERK_SESSION from a completed browser login."
         )
 
     if code == "form_password_incorrect" and email:
         raise ClerkLoginError(
-            f"Incorrect PULSE_PASSWORD for {email}. "
-            "Use the same password as your MacroPulse account."
+            f"Incorrect MacroPulse password for {email}. "
+            "Use the password saved in .pulse_inbox.json from the first sync."
         )
 
     raise ClerkLoginError(f"Clerk sign-in failed ({code}): {message}")
@@ -244,10 +244,8 @@ def _registration_required_error(*, email: str, password: str) -> ClerkLoginErro
         f"1. Open {SIGN_UP_URL} in your browser\n"
         f"2. Register with email: {email}\n"
         f"3. Use password: {password}\n"
-        "4. Add to Coolify env (so the same inbox is reused):\n"
-        f"   PULSE_EMAIL={email}\n"
-        f"   PULSE_EMAIL_PASSWORD={password}\n"
-        "5. Re-run sync — MFA codes will be read from the mail.tm inbox automatically.\n\n"
+        "4. Re-run sync — MFA codes will be read from the mail.td inbox automatically.\n\n"
+        "The inbox is saved to .pulse_inbox.json (and Turso when configured). "
         "Or set CLERK_SESSION from browser cookies after logging in manually."
     )
 
@@ -351,9 +349,9 @@ def login_and_save_session(
     email_code: str | None = None,
 ) -> dict[str, str]:
     if not email.strip():
-        raise ClerkLoginError("PULSE_EMAIL must not be empty")
+        raise ClerkLoginError("Login email must not be empty")
     if not password:
-        raise ClerkLoginError("PULSE_EMAIL_PASSWORD must not be empty")
+        raise ClerkLoginError("Login password must not be empty")
 
     sign_in_url = _sign_in_url(base_url=base_url)
 
