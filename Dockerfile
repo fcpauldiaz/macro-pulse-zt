@@ -31,7 +31,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-scraper.txt .
-RUN pip3 install --no-cache-dir -r requirements-scraper.txt --break-system-packages
+RUN pip3 install --no-cache-dir -r requirements-scraper.txt --break-system-packages \
+    && playwright install --with-deps chromium
 
 COPY scraper/ ./scraper/
 COPY db/ ./db/
