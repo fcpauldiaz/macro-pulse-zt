@@ -18,9 +18,6 @@ from scraper.pulse_client import (
     get_regime,
 )
 
-DEFAULT_SESSION_PATH = Path(".pulse_session.json")
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Scrape MacroPulse data from macro-wrap.vercel.app",
@@ -36,12 +33,6 @@ def _parse_args() -> argparse.Namespace:
         default=Path("output"),
         help="Directory where JSON artifacts are written",
     )
-    parser.add_argument(
-        "--session-path",
-        type=Path,
-        default=DEFAULT_SESSION_PATH,
-        help="Path to persisted Clerk session cookies",
-    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -53,12 +44,12 @@ def _parse_args() -> argparse.Namespace:
         help="Output file (default: output/pulse_data.json)",
     )
 
-    login_parser = subparsers.add_parser("login", help="Sign in with Clerk and save session cookies")
-    login_parser.add_argument("--email", default=None, help="Subscriber email (or PULSE_EMAIL env var)")
+    login_parser = subparsers.add_parser("login", help="Sign in with Clerk via mail.tm inbox")
+    login_parser.add_argument("--email", default=None, help="Override disposable inbox email")
     login_parser.add_argument(
         "--password",
         default=None,
-        help="Subscriber password (or PULSE_PASSWORD env var)",
+        help="Override MacroPulse login password",
     )
     login_parser.add_argument(
         "--headed",
@@ -82,12 +73,7 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Limit number of chart requests",
     )
-    charts_parser.add_argument(
-        "--refresh-login",
-        action="store_true",
-        help="Re-authenticate with Clerk before fetching charts",
-    )
-    charts_parser.add_argument("--email", default=None, help="Subscriber email for refresh login")
+    charts_parser.add_argument("--email", default=None, help="Subscriber email for login")
     charts_parser.add_argument(
         "--password",
         default=None,
@@ -101,12 +87,7 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Limit number of chart requests",
     )
-    all_parser.add_argument(
-        "--refresh-login",
-        action="store_true",
-        help="Re-authenticate with Clerk before fetching charts",
-    )
-    all_parser.add_argument("--email", default=None, help="Subscriber email for refresh login")
+    all_parser.add_argument("--email", default=None, help="Subscriber email for login")
     all_parser.add_argument(
         "--password",
         default=None,
@@ -155,42 +136,24 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
-    import os
-
     from scraper.auth import resolve_login_credentials
 
-    password = (
-        args.password
-        or os.getenv("PULSE_EMAIL_PASSWORD", "").strip()
-        or os.getenv("PULSE_PASSWORD", "")
+    if args.email and args.password:
+        return args.email, args.password
+
+    email, password = resolve_login_credentials()
+    return args.email or email, args.password or password
+
+
+def _ensure_cookies(args: argparse.Namespace) -> dict[str, str]:
+    from scraper.clerk_login import login_and_get_cookies
+
+    email, password = _resolve_credentials(args)
+    return login_and_get_cookies(
+        email=email,
+        password=password,
+        base_url=args.base_url,
     )
-    if args.email:
-        os.environ["PULSE_EMAIL"] = args.email
-    if password:
-        os.environ["PULSE_EMAIL_PASSWORD"] = password
-
-    if args.email:
-        from scraper.disposable_inbox import ensure_inbox_credentials
-
-        inbox = ensure_inbox_credentials()
-        return args.email, inbox.password
-
-    return resolve_login_credentials()
-
-
-def _ensure_session(args: argparse.Namespace) -> dict[str, str]:
-    from scraper.clerk_login import load_session_cookies, login_and_save_session
-
-    if args.refresh_login:
-        email, password = _resolve_credentials(args)
-        return login_and_save_session(
-            email=email,
-            password=password,
-            session_path=args.session_path,
-            base_url=args.base_url,
-        )
-
-    return load_session_cookies(args.session_path)
 
 
 def _write_data(data: dict, output_path: Path) -> None:
@@ -209,22 +172,21 @@ def _cmd_data(args: argparse.Namespace) -> int:
 
 
 def _cmd_login(args: argparse.Namespace) -> int:
-    from scraper.clerk_login import login_and_save_session
+    from scraper.clerk_login import login_and_get_cookies
 
     email, password = _resolve_credentials(args)
-    cookies = login_and_save_session(
+    cookies = login_and_get_cookies(
         email=email,
         password=password,
-        session_path=args.session_path,
         base_url=args.base_url,
         headless=not args.headed,
     )
-    print(f"Saved Clerk session to {args.session_path} ({len(cookies)} cookies)")
+    print(f"Clerk login succeeded ({len(cookies)} cookies for this run)")
     return 0
 
 
 def _fetch_charts(args: argparse.Namespace) -> tuple[dict, list[dict]]:
-    cookies = _ensure_session(args)
+    cookies = _ensure_cookies(args)
     client = PulseClient(base_url=args.base_url, cookies=cookies)
 
     data = fetch_pulse_data(base_url=args.base_url)

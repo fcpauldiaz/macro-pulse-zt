@@ -43,6 +43,8 @@ export const SCHEMA_STATEMENTS = [
     id INTEGER PRIMARY KEY CHECK (id = 1),
     address TEXT NOT NULL,
     password TEXT NOT NULL,
+    account_id TEXT,
+    provider TEXT NOT NULL DEFAULT 'mail.tm',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
 ];

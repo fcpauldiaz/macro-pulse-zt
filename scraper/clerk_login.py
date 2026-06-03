@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import TypedDict
@@ -10,14 +9,26 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from scraper.disposable_inbox import create_inbox_for_email, supports_auto_email_code
+from scraper.disposable_inbox import (
+    InboxCredentials,
+    generate_macro_pulse_password,
+    inbox_credentials_path,
+    load_saved_inbox_credentials,
+    save_inbox_credentials,
+    supports_auto_email_code,
+)
 from scraper.errors import ClerkLoginError
+from scraper.mail_tm_browser import (
+    open_mail_tm,
+    read_email_address,
+    save_storage_state,
+    storage_state_path,
+    wait_for_verification_code,
+)
 
 BASE_URL = "https://macro-wrap.vercel.app"
-DEFAULT_SESSION_PATH = Path(".pulse_session.json")
 SIGN_IN_PATH = "/sign-in"
 PULSE_PATH = "/pulse"
-SIGN_UP_URL = "https://macro-wrap.vercel.app/sign-up"
 
 CLERK_SIGN_IN_JS = """async ({ email, password }) => {
   try {
@@ -120,6 +131,74 @@ CLERK_TICKET_SIGN_IN_JS = """async ({ ticket }) => {
   }
 }"""
 
+CLERK_SIGN_UP_JS = """async ({ email, password }) => {
+  try {
+    const signUp = await window.Clerk.client.signUp.create({
+      emailAddress: email,
+      password,
+    });
+
+    if (signUp.status === 'complete' && signUp.createdSessionId) {
+      await window.Clerk.setActive({ session: signUp.createdSessionId });
+      return { status: 'complete', sessionId: signUp.createdSessionId };
+    }
+
+    const needsEmailVerification =
+      signUp.status === 'missing_requirements' &&
+      (signUp.unverifiedFields ?? []).includes('email_address');
+
+    if (needsEmailVerification) {
+      await signUp.prepareEmailAddressVerification({ strategy: 'email_code' });
+      window.__macroPulsePendingSignUp = signUp;
+      return { status: 'needs_email_code' };
+    }
+
+    return {
+      status: signUp.status,
+      unverifiedFields: signUp.unverifiedFields ?? [],
+      missingFields: signUp.missingFields ?? [],
+    };
+  } catch (err) {
+    const clerkError = err?.errors?.[0];
+    return {
+      status: 'error',
+      code: clerkError?.code ?? 'clerk_error',
+      message: clerkError?.longMessage || clerkError?.message || err?.message || String(err),
+      unverifiedFields: [],
+      missingFields: [],
+    };
+  }
+}"""
+
+CLERK_SIGN_UP_VERIFY_JS = """async ({ emailCode }) => {
+  try {
+    const signUp = window.__macroPulsePendingSignUp;
+    if (!signUp) {
+      return { status: 'error', code: 'missing_sign_up', message: 'No pending Clerk sign-up attempt' };
+    }
+
+    const verified = await signUp.attemptEmailAddressVerification({ code: emailCode });
+    delete window.__macroPulsePendingSignUp;
+
+    if (verified.status === 'complete' && verified.createdSessionId) {
+      await window.Clerk.setActive({ session: verified.createdSessionId });
+      return { status: 'complete', sessionId: verified.createdSessionId };
+    }
+
+    return {
+      status: verified.status,
+      unverifiedFields: verified.unverifiedFields ?? [],
+    };
+  } catch (err) {
+    const clerkError = err?.errors?.[0];
+    return {
+      status: 'error',
+      code: clerkError?.code ?? 'clerk_error',
+      message: clerkError?.longMessage || clerkError?.message || err?.message || String(err),
+    };
+  }
+}"""
+
 
 class StoredCookie(TypedDict, total=False):
     name: str
@@ -137,44 +216,18 @@ def _sign_in_url(*, redirect_path: str = PULSE_PATH, base_url: str = BASE_URL) -
     return f"{base_url.rstrip('/')}{SIGN_IN_PATH}?redirect_url={redirect_url}"
 
 
-def _serialize_cookies(cookies: list[StoredCookie]) -> list[StoredCookie]:
-    return [
-        {
-            "name": cookie["name"],
-            "value": cookie["value"],
-            "domain": cookie.get("domain", ""),
-            "path": cookie.get("path", "/"),
-            "expires": cookie.get("expires", -1),
-            "httpOnly": cookie.get("httpOnly", False),
-            "secure": cookie.get("secure", False),
-            "sameSite": cookie.get("sameSite", "Lax"),
-        }
-        for cookie in cookies
-    ]
+def _cookies_from_browser(cookies: list[StoredCookie]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for cookie in cookies:
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if name and value is not None:
+            result[str(name)] = str(value)
 
+    if "__session" not in result:
+        raise ClerkLoginError("Login completed but '__session' cookie was not set")
 
-def save_session_cookies(cookies: list[StoredCookie], session_path: Path) -> None:
-    session_path.parent.mkdir(parents=True, exist_ok=True)
-    session_path.write_text(json.dumps(_serialize_cookies(cookies), indent=2), encoding="utf-8")
-
-
-def load_session_cookies(session_path: Path) -> dict[str, str]:
-    if not session_path.exists():
-        raise ClerkLoginError(f"Session file not found: {session_path}")
-
-    raw = json.loads(session_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, list):
-        raise ClerkLoginError("Session file must contain a JSON array of cookies")
-
-    cookies: dict[str, str] = {}
-    for item in raw:
-        if isinstance(item, dict) and item.get("name") and item.get("value") is not None:
-            cookies[str(item["name"])] = str(item["value"])
-
-    if "__session" not in cookies:
-        raise ClerkLoginError("Session file is missing required '__session' cookie")
-
-    return cookies
+    return result
 
 
 def _wait_for_clerk(page: Page, timeout_ms: int) -> None:
@@ -207,17 +260,22 @@ def _raise_for_clerk_error(result: dict, *, email: str) -> None:
     code = str(result.get("code", "clerk_error"))
     message = str(result.get("message", "Clerk sign-in failed"))
 
+    if code in {"captcha_invalid", "captcha_not_enabled"}:
+        raise ClerkLoginError(
+            "MacroPulse blocked automatic account creation (CAPTCHA). "
+            "Set CLERK_SECRET_KEY for backend account provisioning."
+        )
+
     if code == "form_identifier_not_found" and email:
         raise ClerkLoginError(
             f"No MacroPulse account exists for {email}. "
-            f"Create one at {SIGN_UP_URL} using this email and PULSE_PASSWORD, "
-            "or set CLERK_SESSION from a completed browser login."
+            "Automatic sign-up will be attempted on the next sync."
         )
 
     if code == "form_password_incorrect" and email:
         raise ClerkLoginError(
-            f"Incorrect PULSE_PASSWORD for {email}. "
-            "Use the same password as your MacroPulse account."
+            f"Incorrect MacroPulse password for {email}. "
+            "Use the password saved in .pulse_inbox.json from the first sync."
         )
 
     raise ClerkLoginError(f"Clerk sign-in failed ({code}): {message}")
@@ -231,25 +289,64 @@ def _clerk_sign_in_phase1(page: Page, *, email: str, password: str) -> dict:
     return result
 
 
-def _clerk_ticket_sign_in(page: Page, *, ticket: str) -> dict:
-    result = _evaluate_clerk(page, CLERK_TICKET_SIGN_IN_JS, {"ticket": ticket})
+def _clerk_sign_up(page: Page, *, email: str, password: str) -> dict:
+    result = _evaluate_clerk(page, CLERK_SIGN_UP_JS, {"email": email, "password": password})
+    if result.get("status") == "error":
+        _raise_for_clerk_error(result, email=email)
+    return result
+
+
+def _clerk_sign_up_verify(page: Page, *, email_code: str) -> dict:
+    result = _evaluate_clerk(page, CLERK_SIGN_UP_VERIFY_JS, {"emailCode": email_code})
     _raise_for_clerk_error(result, email="")
     return result
 
 
-def _registration_required_error(*, email: str, password: str) -> ClerkLoginError:
-    return ClerkLoginError(
-        "No MacroPulse account exists yet for the disposable email below. "
-        "Automatic sign-up is not possible without MacroPulse Clerk API keys.\n\n"
-        f"1. Open {SIGN_UP_URL} in your browser\n"
-        f"2. Register with email: {email}\n"
-        f"3. Use password: {password}\n"
-        "4. Add to Coolify env (so the same inbox is reused):\n"
-        f"   PULSE_EMAIL={email}\n"
-        f"   PULSE_EMAIL_PASSWORD={password}\n"
-        "5. Re-run sync — MFA codes will be read from the mail.tm inbox automatically.\n\n"
-        "Or set CLERK_SESSION from browser cookies after logging in manually."
+def _complete_sign_up_result(
+    page: Page,
+    result: dict,
+    *,
+    email: str,
+    email_code: str | None,
+    mail_page: Page,
+) -> dict:
+    if result.get("status") == "needs_email_code":
+        resolved_code = _resolve_email_code(email, email_code)
+        if not resolved_code:
+            resolved_code = _fetch_email_code_from_mail_tm(mail_page)
+        return _clerk_sign_up_verify(page, email_code=resolved_code)
+
+    if result.get("status") != "complete":
+        raise ClerkLoginError(
+            "MacroPulse sign-up did not complete "
+            f"(status={result.get('status')}, missing={result.get('missingFields')})."
+        )
+
+    return result
+
+
+def _attempt_auto_sign_up(
+    page: Page,
+    mail_page: Page,
+    *,
+    email: str,
+    password: str,
+    email_code: str | None,
+) -> dict:
+    result = _clerk_sign_up(page, email=email, password=password)
+    return _complete_sign_up_result(
+        page,
+        result,
+        email=email,
+        email_code=email_code,
+        mail_page=mail_page,
     )
+
+
+def _clerk_ticket_sign_in(page: Page, *, ticket: str) -> dict:
+    result = _evaluate_clerk(page, CLERK_TICKET_SIGN_IN_JS, {"ticket": ticket})
+    _raise_for_clerk_error(result, email="")
+    return result
 
 
 def _complete_auth_result(
@@ -258,19 +355,19 @@ def _complete_auth_result(
     *,
     email: str,
     email_code: str | None,
-    timeout_ms: int,
+    mail_page: Page,
 ) -> dict:
     if result.get("status") == "needs_email_code":
         resolved_code = _resolve_email_code(email, email_code)
         if not resolved_code and supports_auto_email_code(email):
-            resolved_code = _fetch_email_code_from_inbox(email)
+            resolved_code = _fetch_email_code_from_mail_tm(mail_page)
 
         if not resolved_code:
             identifier = result.get("safeIdentifier") or email
             raise ClerkLoginError(
                 "Clerk requires an email verification code after password sign-in. "
-                f"Check {identifier} for the code and set PULSE_MFA_CODE, "
-                "or set CLERK_SESSION from a completed browser login for unattended sync."
+                f"Check {identifier} on https://mail.tm/en/ for the code, "
+                "or set PULSE_MFA_CODE for a one-time override."
             )
 
         return _clerk_sign_in_phase2(page, email_code=resolved_code)
@@ -301,64 +398,111 @@ def _resolve_email_code(email: str, manual_code: str | None) -> str | None:
     return None
 
 
-def _fetch_email_code_from_inbox(email: str) -> str:
-    try:
-        inbox = create_inbox_for_email(email)
-    except ValueError as exc:
-        raise ClerkLoginError(str(exc)) from exc
-
+def _fetch_email_code_from_mail_tm(mail_page: Page) -> str:
     timeout = float(os.getenv("PULSE_EMAIL_CODE_TIMEOUT", "120"))
     poll_interval = float(os.getenv("PULSE_EMAIL_POLL_INTERVAL", "3"))
 
     try:
-        return inbox.wait_for_verification_code_sync(
+        return wait_for_verification_code(
+            mail_page,
             timeout_seconds=timeout,
             poll_interval_seconds=poll_interval,
         )
     except TimeoutError as exc:
         raise ClerkLoginError(
-            f"Timed out waiting for Clerk verification code in inbox for {email}. "
-            "Ensure your MacroPulse account uses this disposable address."
+            "Timed out waiting for Clerk verification code on https://mail.tm/en/. "
+            "Ensure your MacroPulse account uses the disposable address shown there."
         ) from exc
     except RuntimeError as exc:
-        raise ClerkLoginError(f"Failed to read disposable inbox for {email}: {exc}") from exc
+        raise ClerkLoginError(f"Failed to read mail.tm inbox: {exc}") from exc
 
 
-def _launch_browser(playwright, *, headless: bool):
+def _launch_browser(playwright, *, headless: bool, storage_state: Path | None = None):
     browser = playwright.chromium.launch(
         headless=headless,
         args=["--disable-blink-features=AutomationControlled"],
     )
-    context = browser.new_context(
-        user_agent=(
+    context_options = {
+        "user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         ),
-        viewport={"width": 1280, "height": 720},
-        locale="en-US",
-    )
+        "viewport": {"width": 1280, "height": 720},
+        "locale": "en-US",
+    }
+    if storage_state and storage_state.exists():
+        context = browser.new_context(storage_state=str(storage_state), **context_options)
+    else:
+        context = browser.new_context(**context_options)
     return browser, context
 
 
-def login_and_save_session(
+def _resolve_mail_tm_credentials(
+    mail_page: Page,
+    *,
+    requested_email: str,
+    requested_password: str,
+    saved: InboxCredentials | None,
+) -> InboxCredentials:
+    page_email = read_email_address(mail_page)
+
+    if saved and saved.address.lower() != page_email.lower():
+        raise ClerkLoginError(
+            f"mail.tm inbox for {saved.address} was not restored (got {page_email}). "
+            f"Ensure {storage_state_path()} persists across restarts, or delete "
+            f"{inbox_credentials_path()} and run sync again to create a new inbox."
+        )
+
+    if requested_email.strip() and requested_email.strip().lower() != page_email.lower():
+        raise ClerkLoginError(
+            f"mail.tm inbox is {page_email}, but login was requested for {requested_email.strip()}."
+        )
+
+    password = requested_password.strip() or (saved.password if saved else generate_macro_pulse_password())
+    credentials = InboxCredentials(address=page_email, password=password)
+
+    if not saved or saved.address != credentials.address or saved.password != credentials.password:
+        save_inbox_credentials(credentials)
+        if not saved:
+            print(
+                "Created disposable inbox via mail.tm:\n"
+                f"  email: {credentials.address}\n"
+                f"  password: {credentials.password}\n"
+                f"  saved to {inbox_credentials_path()}"
+            )
+
+    return credentials
+
+
+def login_and_get_cookies(
     *,
     email: str,
     password: str,
-    session_path: Path = DEFAULT_SESSION_PATH,
     base_url: str = BASE_URL,
     headless: bool = True,
     timeout_ms: int = 90_000,
     email_code: str | None = None,
 ) -> dict[str, str]:
-    if not email.strip():
-        raise ClerkLoginError("PULSE_EMAIL must not be empty")
-    if not password:
-        raise ClerkLoginError("PULSE_EMAIL_PASSWORD must not be empty")
-
     sign_in_url = _sign_in_url(base_url=base_url)
+    saved_inbox = load_saved_inbox_credentials()
+    mailtm_state_path = storage_state_path()
 
     with sync_playwright() as playwright:
-        browser, context = _launch_browser(playwright, headless=headless)
+        browser, context = _launch_browser(
+            playwright,
+            headless=headless,
+            storage_state=mailtm_state_path if saved_inbox else None,
+        )
+        mail_page = open_mail_tm(context, timeout_ms=timeout_ms)
+        credentials = _resolve_mail_tm_credentials(
+            mail_page,
+            requested_email=email,
+            requested_password=password,
+            saved=saved_inbox,
+        )
+        resolved_email = credentials.address
+        resolved_password = credentials.password
+
         page = context.new_page()
 
         try:
@@ -370,25 +514,35 @@ def login_and_save_session(
             ticket = None
             if clerk_secret_key():
                 try:
-                    ticket = ensure_user_sign_in_ticket(email, password)
+                    ticket = ensure_user_sign_in_ticket(resolved_email, resolved_password)
                 except RuntimeError as exc:
                     raise ClerkLoginError(str(exc)) from exc
 
             if ticket:
                 result = _clerk_ticket_sign_in(page, ticket=ticket)
             else:
-                result = _clerk_sign_in_phase1(page, email=email, password=password)
+                result = _clerk_sign_in_phase1(
+                    page,
+                    email=resolved_email,
+                    password=resolved_password,
+                )
 
                 if result.get("code") == "form_identifier_not_found":
-                    raise _registration_required_error(email=email, password=password)
-
-                result = _complete_auth_result(
-                    page,
-                    result,
-                    email=email,
-                    email_code=email_code,
-                    timeout_ms=timeout_ms,
-                )
+                    result = _attempt_auto_sign_up(
+                        page,
+                        mail_page,
+                        email=resolved_email,
+                        password=resolved_password,
+                        email_code=email_code,
+                    )
+                else:
+                    result = _complete_auth_result(
+                        page,
+                        result,
+                        email=resolved_email,
+                        email_code=email_code,
+                        mail_page=mail_page,
+                    )
 
             if result.get("status") != "complete":
                 raise ClerkLoginError(
@@ -403,11 +557,8 @@ def login_and_save_session(
                 "Timed out waiting for Clerk sign-in; verify credentials, MFA, or email code settings"
             ) from exc
         finally:
+            save_storage_state(context, mailtm_state_path)
             cookies = context.cookies()
             browser.close()
 
-    if not any(cookie.get("name") == "__session" for cookie in cookies):
-        raise ClerkLoginError("Login completed but '__session' cookie was not set")
-
-    save_session_cookies(cookies, session_path)
-    return load_session_cookies(session_path)
+    return _cookies_from_browser(cookies)
