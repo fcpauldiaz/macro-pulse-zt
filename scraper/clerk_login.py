@@ -132,11 +132,40 @@ CLERK_TICKET_SIGN_IN_JS = """async ({ ticket }) => {
 }"""
 
 CLERK_SIGN_UP_JS = """async ({ email, password }) => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const readCaptchaToken = () => {
+    const turnstile = document.querySelector('input[name="cf-turnstile-response"]');
+    if (turnstile?.value) {
+      return turnstile.value;
+    }
+    const recaptcha = document.querySelector('textarea[name="g-recaptcha-response"]');
+    if (recaptcha?.value) {
+      return recaptcha.value;
+    }
+    return null;
+  };
+
+  const waitForCaptchaToken = async (timeoutMs = 20000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const token = readCaptchaToken();
+      if (token) {
+        return token;
+      }
+      await sleep(500);
+    }
+    return null;
+  };
+
   try {
-    const signUp = await window.Clerk.client.signUp.create({
-      emailAddress: email,
-      password,
-    });
+    const captchaToken = await waitForCaptchaToken();
+    const payload = { emailAddress: email, password };
+    if (captchaToken) {
+      payload.captchaToken = captchaToken;
+    }
+
+    const signUp = await window.Clerk.client.signUp.create(payload);
 
     if (signUp.status === 'complete' && signUp.createdSessionId) {
       await window.Clerk.setActive({ session: signUp.createdSessionId });
@@ -262,8 +291,10 @@ def _raise_for_clerk_error(result: dict, *, email: str) -> None:
 
     if code in {"captcha_invalid", "captcha_not_enabled"}:
         raise ClerkLoginError(
-            "MacroPulse blocked automatic account creation (CAPTCHA). "
-            "Set CLERK_SECRET_KEY for backend account provisioning."
+            "MacroPulse blocked automatic account creation (CAPTCHA) from the Coolify container. "
+            "This happens on first sync when no MacroPulse account exists yet for the mail.tm address. "
+            "Persist .pulse_inbox.json and .pulse_mailtm_state.json across runs, or set CLERK_SECRET_KEY "
+            "only if you want backend account creation instead of browser sign-up."
         )
 
     if code == "form_identifier_not_found" and email:
@@ -333,6 +364,7 @@ def _attempt_auto_sign_up(
     password: str,
     email_code: str | None,
 ) -> dict:
+    page.wait_for_timeout(5_000)
     result = _clerk_sign_up(page, email=email, password=password)
     return _complete_sign_up_result(
         page,
