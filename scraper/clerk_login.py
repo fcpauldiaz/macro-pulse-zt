@@ -9,6 +9,7 @@ from urllib.parse import quote
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from scraper.disposable_inbox import create_inbox_for_email, supports_auto_email_code
 from scraper.errors import ClerkLoginError
 
 BASE_URL = "https://macro-wrap.vercel.app"
@@ -80,9 +81,9 @@ def _wait_for_session_cookie(page: Page, timeout_ms: int) -> None:
     )
 
 
-def _clerk_sign_in(page: Page, *, email: str, password: str, email_code: str | None) -> dict:
+def _clerk_sign_in_phase1(page: Page, *, email: str, password: str) -> dict:
     return page.evaluate(
-        """async ({ email, password, emailCode }) => {
+        """async ({ email, password }) => {
           const signIn = await window.Clerk.client.signIn.create({ identifier: email });
           const first = await signIn.attemptFirstFactor({ strategy: 'password', password });
 
@@ -113,11 +114,22 @@ def _clerk_sign_in(page: Page, *, email: str, password: str, email_code: str | N
             emailAddressId: emailFactor.emailAddressId,
           });
 
-          if (!emailCode) {
-            return {
-              status: 'needs_email_code',
-              safeIdentifier: emailFactor.safeIdentifier ?? null,
-            };
+          window.__macroPulsePendingSignIn = signIn;
+          return {
+            status: 'needs_email_code',
+            safeIdentifier: emailFactor.safeIdentifier ?? null,
+          };
+        }""",
+        {"email": email, "password": password},
+    )
+
+
+def _clerk_sign_in_phase2(page: Page, *, email_code: str) -> dict:
+    return page.evaluate(
+        """async ({ emailCode }) => {
+          const signIn = window.__macroPulsePendingSignIn;
+          if (!signIn) {
+            return { status: 'error', error: 'No pending Clerk sign-in attempt' };
           }
 
           const second = await signIn.attemptSecondFactor({
@@ -125,15 +137,54 @@ def _clerk_sign_in(page: Page, *, email: str, password: str, email_code: str | N
             code: emailCode,
           });
 
+          delete window.__macroPulsePendingSignIn;
+
           if (second.status === 'complete' && second.createdSessionId) {
             await window.Clerk.setActive({ session: second.createdSessionId });
             return { status: 'complete', sessionId: second.createdSessionId };
           }
 
-          return { status: second.status, supportedSecondFactors: factors };
+          return {
+            status: second.status,
+            supportedSecondFactors: signIn.supportedSecondFactors ?? [],
+          };
         }""",
-        {"email": email, "password": password, "emailCode": email_code},
+        {"emailCode": email_code},
     )
+
+
+def _resolve_email_code(email: str, manual_code: str | None) -> str | None:
+    if manual_code:
+        return manual_code
+
+    env_code = os.getenv("PULSE_MFA_CODE", "").strip()
+    if env_code:
+        return env_code
+
+    return None
+
+
+def _fetch_email_code_from_inbox(email: str) -> str:
+    try:
+        inbox = create_inbox_for_email(email)
+    except ValueError as exc:
+        raise ClerkLoginError(str(exc)) from exc
+
+    timeout = float(os.getenv("PULSE_EMAIL_CODE_TIMEOUT", "120"))
+    poll_interval = float(os.getenv("PULSE_EMAIL_POLL_INTERVAL", "3"))
+
+    try:
+        return inbox.wait_for_verification_code_sync(
+            timeout_seconds=timeout,
+            poll_interval_seconds=poll_interval,
+        )
+    except TimeoutError as exc:
+        raise ClerkLoginError(
+            f"Timed out waiting for Clerk verification code in inbox for {email}. "
+            "Ensure your MacroPulse account uses this disposable address."
+        ) from exc
+    except RuntimeError as exc:
+        raise ClerkLoginError(f"Failed to read disposable inbox for {email}: {exc}") from exc
 
 
 def login_and_save_session(
@@ -151,7 +202,6 @@ def login_and_save_session(
     if not password:
         raise ClerkLoginError("PULSE_PASSWORD must not be empty")
 
-    resolved_email_code = email_code or os.getenv("PULSE_MFA_CODE", "").strip() or None
     sign_in_url = _sign_in_url(base_url=base_url)
 
     with sync_playwright() as playwright:
@@ -163,20 +213,24 @@ def login_and_save_session(
             page.goto(sign_in_url, wait_until="networkidle", timeout=timeout_ms)
             page.wait_for_function("window.Clerk && window.Clerk.loaded", timeout=timeout_ms)
 
-            result = _clerk_sign_in(
-                page,
-                email=email,
-                password=password,
-                email_code=resolved_email_code,
-            )
+            result = _clerk_sign_in_phase1(page, email=email, password=password)
 
             if result.get("status") == "needs_email_code":
-                identifier = result.get("safeIdentifier") or "your email"
-                raise ClerkLoginError(
-                    "Clerk requires an email verification code after password sign-in. "
-                    f"Check {identifier} for the code and set PULSE_MFA_CODE for this run, "
-                    "or set CLERK_SESSION from a completed browser login for unattended sync."
-                )
+                resolved_code = _resolve_email_code(email, email_code)
+                if not resolved_code and supports_auto_email_code(email):
+                    resolved_code = _fetch_email_code_from_inbox(email)
+
+                if not resolved_code:
+                    identifier = result.get("safeIdentifier") or email
+                    raise ClerkLoginError(
+                        "Clerk requires an email verification code after password sign-in. "
+                        f"Check {identifier} for the code and set PULSE_MFA_CODE, "
+                        "register the account with a supported disposable email "
+                        "(1secmail, mail.tm, guerrillamail), or set CLERK_SESSION "
+                        "from a completed browser login for unattended sync."
+                    )
+
+                result = _clerk_sign_in_phase2(page, email_code=resolved_code)
 
             if result.get("status") != "complete":
                 raise ClerkLoginError(

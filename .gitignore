@@ -1,5 +1,6 @@
 .env
 .pulse_session.json
+.pulse_inbox.json
 output/
 __pycache__/
 *.pyc
