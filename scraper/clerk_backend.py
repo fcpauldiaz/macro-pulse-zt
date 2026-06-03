@@ -112,6 +112,21 @@ def fetch_testing_token(*, secret_key: str) -> str:
     return str(payload["token"])
 
 
+def resolve_testing_token() -> str | None:
+    explicit = os.environ.get("CLERK_TESTING_TOKEN", "").strip()
+    if explicit:
+        return explicit
+
+    secret_key = clerk_secret_key()
+    if not secret_key:
+        return None
+
+    try:
+        return fetch_testing_token(secret_key=secret_key)
+    except RuntimeError:
+        return None
+
+
 def ensure_user_sign_in_ticket(email: str, password: str) -> str | None:
     secret_key = clerk_secret_key()
     if not secret_key:

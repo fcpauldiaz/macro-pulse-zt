@@ -120,6 +120,29 @@ CLERK_TICKET_SIGN_IN_JS = """async ({ ticket }) => {
   }
 }"""
 
+CLERK_SIGN_UP_JS = """async ({ email, password }) => {
+  try {
+    const signUp = await window.Clerk.client.signUp.create({
+      emailAddress: email,
+      password,
+      firstName: 'Macro',
+      lastName: 'Pulse',
+    });
+    return {
+      status: signUp.status,
+      unverified: signUp.unverifiedFields ?? [],
+      missing: signUp.missingFields ?? [],
+    };
+  } catch (err) {
+    const clerkError = err?.errors?.[0];
+    return {
+      status: 'error',
+      code: clerkError?.code ?? 'clerk_error',
+      message: clerkError?.longMessage || clerkError?.message || err?.message || String(err),
+    };
+  }
+}"""
+
 CLERK_SIGN_UP_VERIFY_JS = """async ({ code }) => {
   try {
     const result = await window.Clerk.client.signUp.attemptEmailAddressVerification({ code });
@@ -261,7 +284,13 @@ def _clerk_verify_sign_up(page: Page, *, email_code: str) -> dict:
     return result
 
 
-def _install_clerk_testing_token_route(page: Page, testing_token: str) -> None:
+def _install_clerk_testing_token_route(page: Page) -> None:
+    from scraper.clerk_backend import resolve_testing_token
+
+    testing_token = resolve_testing_token()
+    if not testing_token:
+        return
+
     def append_token(url: str) -> str:
         if "__clerk_testing_token=" in url or "clerk.accounts.dev" not in url:
             return url
@@ -274,56 +303,33 @@ def _install_clerk_testing_token_route(page: Page, testing_token: str) -> None:
     page.route("**/*clerk.accounts.dev/**", handle_route)
 
 
-def _attempt_frontend_sign_up(page: Page, *, email: str, password: str, timeout_ms: int) -> None:
-    from scraper.clerk_backend import clerk_secret_key, fetch_testing_token
-
-    secret_key = clerk_secret_key()
-    if secret_key:
-        try:
-            testing_token = fetch_testing_token(secret_key=secret_key)
-            _install_clerk_testing_token_route(page, testing_token)
-        except RuntimeError:
-            pass
-
-    signup_payload: dict = {}
-
-    def capture_sign_up(response) -> None:
-        if response.request.method == "POST" and "/sign_ups" in response.url:
-            try:
-                signup_payload["body"] = response.json()
-            except Exception:
-                signup_payload["body"] = {"raw": response.text()[:300]}
-
-    page.on("response", capture_sign_up)
-    page.goto(f"{BASE_URL.rstrip('/')}/sign-up", wait_until="load", timeout=timeout_ms)
-    _wait_for_clerk(page, timeout_ms)
-
-    page.locator('input[name="firstName"]').fill("Macro")
-    page.locator('input[name="lastName"]').fill("Pulse")
-    page.locator('input[name="emailAddress"]').fill(email)
-    page.locator('input[name="password"]').fill(password)
-    page.locator("form button").last.click()
-
-    deadline_ms = timeout_ms // 3
-    elapsed = 0
-    while elapsed < deadline_ms and "body" not in signup_payload:
-        page.wait_for_timeout(500)
-        elapsed += 500
-
-    body = signup_payload.get("body")
-    if not isinstance(body, dict):
-        raise ClerkLoginError("Automatic MacroPulse sign-up did not start. Set CLERK_SECRET_KEY for server-side signup.")
-
-    errors = body.get("errors")
-    if isinstance(errors, list) and errors:
-        code = str(errors[0].get("code", "signup_failed"))
-        message = str(errors[0].get("long_message") or errors[0].get("message") or "Sign-up failed")
+def _raise_for_sign_up_result(result: dict, *, email: str) -> None:
+    if result.get("status") == "error" or result.get("code"):
+        code = str(result.get("code", "signup_failed"))
+        message = str(result.get("message", "Sign-up failed"))
         if code == "captcha_invalid":
             raise ClerkLoginError(
-                "Automatic MacroPulse sign-up blocked by Clerk CAPTCHA. "
-                "Set CLERK_SECRET_KEY in Coolify to enable backend account creation."
+                "Automatic MacroPulse sign-up blocked by Clerk CAPTCHA in headless mode. "
+                "Add CLERK_SECRET_KEY to Coolify (Clerk Dashboard → API Keys for the MacroPulse "
+                "instance) so the scraper can create the account server-side, or register once at "
+                f"{SIGN_UP_URL} with {email} and your PULSE_EMAIL_PASSWORD, then re-run sync."
             )
         raise ClerkLoginError(f"Automatic MacroPulse sign-up failed ({code}): {message}")
+
+    status = str(result.get("status", ""))
+    if status in {"complete", "missing_requirements"}:
+        return
+
+    raise ClerkLoginError(
+        f"Automatic MacroPulse sign-up returned unexpected status '{status}' for {email}."
+    )
+
+
+def _attempt_frontend_sign_up(page: Page, *, email: str, password: str) -> dict:
+    _install_clerk_testing_token_route(page)
+    result = _evaluate_clerk(page, CLERK_SIGN_UP_JS, {"email": email, "password": password})
+    _raise_for_sign_up_result(result, email=email)
+    return result
 
 
 def _ensure_macro_pulse_account(page: Page, *, email: str, password: str, timeout_ms: int) -> dict | None:
@@ -333,11 +339,11 @@ def _ensure_macro_pulse_account(page: Page, *, email: str, password: str, timeou
     if ticket:
         return _clerk_ticket_sign_in(page, ticket=ticket)
 
-    _attempt_frontend_sign_up(page, email=email, password=password, timeout_ms=timeout_ms)
+    sign_up = _attempt_frontend_sign_up(page, email=email, password=password)
+    if sign_up.get("status") == "complete":
+        return sign_up
 
     verification_code = _fetch_email_code_from_inbox(email)
-    page.goto(f"{BASE_URL.rstrip('/')}/sign-up", wait_until="load", timeout=timeout_ms)
-    _wait_for_clerk(page, timeout_ms)
     return _clerk_verify_sign_up(page, email_code=verification_code)
 
 
@@ -449,6 +455,7 @@ def login_and_save_session(
     with sync_playwright() as playwright:
         browser, context = _launch_browser(playwright, headless=headless)
         page = context.new_page()
+        _install_clerk_testing_token_route(page)
 
         try:
             page.goto(sign_in_url, wait_until="load", timeout=timeout_ms)
