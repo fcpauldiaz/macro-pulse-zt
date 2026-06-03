@@ -10,8 +10,22 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from scraper.disposable_inbox import create_inbox_for_email, supports_auto_email_code
+from scraper.disposable_inbox import (
+    InboxCredentials,
+    generate_macro_pulse_password,
+    inbox_credentials_path,
+    load_saved_inbox_credentials,
+    save_inbox_credentials,
+    supports_auto_email_code,
+)
 from scraper.errors import ClerkLoginError
+from scraper.mail_tm_browser import (
+    open_mail_tm,
+    read_email_address,
+    save_storage_state,
+    storage_state_path,
+    wait_for_verification_code,
+)
 
 BASE_URL = "https://macro-wrap.vercel.app"
 DEFAULT_SESSION_PATH = Path(".pulse_session.json")
@@ -244,7 +258,7 @@ def _registration_required_error(*, email: str, password: str) -> ClerkLoginErro
         f"1. Open {SIGN_UP_URL} in your browser\n"
         f"2. Register with email: {email}\n"
         f"3. Use password: {password}\n"
-        "4. Re-run sync — MFA codes will be read from the mail.td inbox automatically.\n\n"
+        "4. Re-run sync — MFA codes will be read from https://mail.tm/en/ automatically.\n\n"
         "The inbox is saved to .pulse_inbox.json (and Turso when configured). "
         "Or set CLERK_SESSION from browser cookies after logging in manually."
     )
@@ -256,12 +270,12 @@ def _complete_auth_result(
     *,
     email: str,
     email_code: str | None,
-    timeout_ms: int,
+    mail_page: Page,
 ) -> dict:
     if result.get("status") == "needs_email_code":
         resolved_code = _resolve_email_code(email, email_code)
         if not resolved_code and supports_auto_email_code(email):
-            resolved_code = _fetch_email_code_from_inbox(email)
+            resolved_code = _fetch_email_code_from_mail_tm(mail_page)
 
         if not resolved_code:
             identifier = result.get("safeIdentifier") or email
@@ -299,43 +313,81 @@ def _resolve_email_code(email: str, manual_code: str | None) -> str | None:
     return None
 
 
-def _fetch_email_code_from_inbox(email: str) -> str:
-    try:
-        inbox = create_inbox_for_email(email)
-    except ValueError as exc:
-        raise ClerkLoginError(str(exc)) from exc
-
+def _fetch_email_code_from_mail_tm(mail_page: Page) -> str:
     timeout = float(os.getenv("PULSE_EMAIL_CODE_TIMEOUT", "120"))
     poll_interval = float(os.getenv("PULSE_EMAIL_POLL_INTERVAL", "3"))
 
     try:
-        return inbox.wait_for_verification_code_sync(
+        return wait_for_verification_code(
+            mail_page,
             timeout_seconds=timeout,
             poll_interval_seconds=poll_interval,
         )
     except TimeoutError as exc:
         raise ClerkLoginError(
-            f"Timed out waiting for Clerk verification code in inbox for {email}. "
-            "Ensure your MacroPulse account uses this disposable address."
+            "Timed out waiting for Clerk verification code on https://mail.tm/en/. "
+            "Ensure your MacroPulse account uses the disposable address shown there."
         ) from exc
     except RuntimeError as exc:
-        raise ClerkLoginError(f"Failed to read disposable inbox for {email}: {exc}") from exc
+        raise ClerkLoginError(f"Failed to read mail.tm inbox: {exc}") from exc
 
 
-def _launch_browser(playwright, *, headless: bool):
+def _launch_browser(playwright, *, headless: bool, storage_state: Path | None = None):
     browser = playwright.chromium.launch(
         headless=headless,
         args=["--disable-blink-features=AutomationControlled"],
     )
-    context = browser.new_context(
-        user_agent=(
+    context_options = {
+        "user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         ),
-        viewport={"width": 1280, "height": 720},
-        locale="en-US",
-    )
+        "viewport": {"width": 1280, "height": 720},
+        "locale": "en-US",
+    }
+    if storage_state and storage_state.exists():
+        context = browser.new_context(storage_state=str(storage_state), **context_options)
+    else:
+        context = browser.new_context(**context_options)
     return browser, context
+
+
+def _resolve_mail_tm_credentials(
+    mail_page: Page,
+    *,
+    requested_email: str,
+    requested_password: str,
+    saved: InboxCredentials | None,
+) -> InboxCredentials:
+    page_email = read_email_address(mail_page)
+
+    if saved and saved.address.lower() != page_email.lower():
+        raise ClerkLoginError(
+            f"mail.tm session for {saved.address} was not restored (got {page_email}). "
+            f"Ensure {storage_state_path()} persists across restarts, or delete "
+            f"{inbox_credentials_path()} and run sync again to create a new inbox."
+        )
+
+    if requested_email.strip() and requested_email.strip().lower() != page_email.lower():
+        raise ClerkLoginError(
+            f"mail.tm inbox is {page_email}, but login was requested for {requested_email.strip()}."
+        )
+
+    password = requested_password.strip() or (saved.password if saved else generate_macro_pulse_password())
+    credentials = InboxCredentials(address=page_email, password=password)
+
+    if not saved or saved.address != credentials.address or saved.password != credentials.password:
+        save_inbox_credentials(credentials)
+        if not saved:
+            print(
+                "Created disposable inbox via mail.tm:\n"
+                f"  email: {credentials.address}\n"
+                f"  password: {credentials.password}\n"
+                f"  saved to {inbox_credentials_path()}\n"
+                "Register this account at https://macro-wrap.vercel.app/sign-up, then re-run sync."
+            )
+
+    return credentials
 
 
 def login_and_save_session(
@@ -348,15 +400,26 @@ def login_and_save_session(
     timeout_ms: int = 90_000,
     email_code: str | None = None,
 ) -> dict[str, str]:
-    if not email.strip():
-        raise ClerkLoginError("Login email must not be empty")
-    if not password:
-        raise ClerkLoginError("Login password must not be empty")
-
     sign_in_url = _sign_in_url(base_url=base_url)
+    saved_inbox = load_saved_inbox_credentials()
+    mailtm_state_path = storage_state_path()
 
     with sync_playwright() as playwright:
-        browser, context = _launch_browser(playwright, headless=headless)
+        browser, context = _launch_browser(
+            playwright,
+            headless=headless,
+            storage_state=mailtm_state_path if saved_inbox else None,
+        )
+        mail_page = open_mail_tm(context, timeout_ms=timeout_ms)
+        credentials = _resolve_mail_tm_credentials(
+            mail_page,
+            requested_email=email,
+            requested_password=password,
+            saved=saved_inbox,
+        )
+        resolved_email = credentials.address
+        resolved_password = credentials.password
+
         page = context.new_page()
 
         try:
@@ -368,24 +431,31 @@ def login_and_save_session(
             ticket = None
             if clerk_secret_key():
                 try:
-                    ticket = ensure_user_sign_in_ticket(email, password)
+                    ticket = ensure_user_sign_in_ticket(resolved_email, resolved_password)
                 except RuntimeError as exc:
                     raise ClerkLoginError(str(exc)) from exc
 
             if ticket:
                 result = _clerk_ticket_sign_in(page, ticket=ticket)
             else:
-                result = _clerk_sign_in_phase1(page, email=email, password=password)
+                result = _clerk_sign_in_phase1(
+                    page,
+                    email=resolved_email,
+                    password=resolved_password,
+                )
 
                 if result.get("code") == "form_identifier_not_found":
-                    raise _registration_required_error(email=email, password=password)
+                    raise _registration_required_error(
+                        email=resolved_email,
+                        password=resolved_password,
+                    )
 
                 result = _complete_auth_result(
                     page,
                     result,
-                    email=email,
+                    email=resolved_email,
                     email_code=email_code,
-                    timeout_ms=timeout_ms,
+                    mail_page=mail_page,
                 )
 
             if result.get("status") != "complete":
@@ -401,6 +471,7 @@ def login_and_save_session(
                 "Timed out waiting for Clerk sign-in; verify credentials, MFA, or email code settings"
             ) from exc
         finally:
+            save_storage_state(context, mailtm_state_path)
             cookies = context.cookies()
             browser.close()
 

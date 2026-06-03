@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 from scraper.errors import ClerkLoginError, PulseDataError
@@ -25,20 +26,13 @@ def resolve_cookies() -> dict[str, str]:
 
 
 def resolve_login_credentials() -> tuple[str, str]:
-    from scraper.disposable_inbox import ensure_inbox_credentials
+    from scraper.disposable_inbox import load_saved_inbox_credentials
 
-    try:
-        inbox = ensure_inbox_credentials()
-    except ValueError as exc:
-        raise PulseDataError(str(exc)) from exc
+    saved = load_saved_inbox_credentials()
+    if saved:
+        return saved.address, saved.password
 
-    if not inbox.password:
-        raise PulseDataError(
-            "Pulse API requires authentication. Set CLERK_SESSION, PULSE_SESSION_PATH, "
-            "or SMTP_KEY (temp email API key for inbox provisioning and MacroPulse login)."
-        )
-
-    return inbox.address, inbox.password
+    return "", ""
 
 
 def ensure_cookies(*, base_url: str) -> dict[str, str]:
