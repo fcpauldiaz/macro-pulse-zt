@@ -1,4 +1,5 @@
 import { asNumber, asString, getDb } from "@/lib/db";
+import { ensureSchema } from "@/lib/schema";
 import type {
   DailySignal,
   DashboardData,
@@ -38,6 +39,7 @@ function mapPosition(row: Record<string, unknown>): TradePosition {
 
 export async function getDashboardData(): Promise<DashboardData> {
   const db = getDb();
+  await ensureSchema(db);
 
   const snapshotResult = await db.execute(`
     SELECT

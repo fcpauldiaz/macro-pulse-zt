@@ -19,7 +19,7 @@ export default async function HomePage() {
   if (!data.snapshot) {
     return (
       <main className="page-shell">
-        <EmptyState message="No snapshots yet. Run `python -m scraper.scrape_pulse sync` to ingest today's signals." />
+        <EmptyState message="No snapshots yet. Run the Coolify scheduled task (/bin/bash /app/scripts/daily-sync.sh) or `python -m scraper.scrape_pulse sync` to ingest today's signals." />
       </main>
     );
   }
