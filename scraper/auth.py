@@ -27,7 +27,11 @@ def resolve_cookies() -> dict[str, str]:
 def resolve_login_credentials() -> tuple[str, str]:
     from scraper.disposable_inbox import ensure_inbox_credentials
 
-    inbox = ensure_inbox_credentials()
+    try:
+        inbox = ensure_inbox_credentials()
+    except ValueError as exc:
+        raise PulseDataError(str(exc)) from exc
+
     if not inbox.password:
         raise PulseDataError(
             "Pulse API requires authentication. Set CLERK_SESSION, PULSE_SESSION_PATH, "

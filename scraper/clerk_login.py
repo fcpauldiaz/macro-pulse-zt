@@ -120,47 +120,6 @@ CLERK_TICKET_SIGN_IN_JS = """async ({ ticket }) => {
   }
 }"""
 
-CLERK_SIGN_UP_JS = """async ({ email, password }) => {
-  try {
-    const signUp = await window.Clerk.client.signUp.create({
-      emailAddress: email,
-      password,
-      firstName: 'Macro',
-      lastName: 'Pulse',
-    });
-    return {
-      status: signUp.status,
-      unverified: signUp.unverifiedFields ?? [],
-      missing: signUp.missingFields ?? [],
-    };
-  } catch (err) {
-    const clerkError = err?.errors?.[0];
-    return {
-      status: 'error',
-      code: clerkError?.code ?? 'clerk_error',
-      message: clerkError?.longMessage || clerkError?.message || err?.message || String(err),
-    };
-  }
-}"""
-
-CLERK_SIGN_UP_VERIFY_JS = """async ({ code }) => {
-  try {
-    const result = await window.Clerk.client.signUp.attemptEmailAddressVerification({ code });
-    if (result.status === 'complete' && result.createdSessionId) {
-      await window.Clerk.setActive({ session: result.createdSessionId });
-      return { status: 'complete', sessionId: result.createdSessionId };
-    }
-    return { status: result.status };
-  } catch (err) {
-    const clerkError = err?.errors?.[0];
-    return {
-      status: 'error',
-      code: clerkError?.code ?? 'clerk_error',
-      message: clerkError?.longMessage || clerkError?.message || err?.message || String(err),
-    };
-  }
-}"""
-
 
 class StoredCookie(TypedDict, total=False):
     name: str
@@ -278,73 +237,19 @@ def _clerk_ticket_sign_in(page: Page, *, ticket: str) -> dict:
     return result
 
 
-def _clerk_verify_sign_up(page: Page, *, email_code: str) -> dict:
-    result = _evaluate_clerk(page, CLERK_SIGN_UP_VERIFY_JS, {"code": email_code})
-    _raise_for_clerk_error(result, email="")
-    return result
-
-
-def _install_clerk_testing_token_route(page: Page) -> None:
-    from scraper.clerk_backend import resolve_testing_token
-
-    testing_token = resolve_testing_token()
-    if not testing_token:
-        return
-
-    def append_token(url: str) -> str:
-        if "__clerk_testing_token=" in url or "clerk.accounts.dev" not in url:
-            return url
-        separator = "&" if "?" in url else "?"
-        return f"{url}{separator}__clerk_testing_token={quote(testing_token)}"
-
-    def handle_route(route) -> None:
-        route.continue_(url=append_token(route.request.url))
-
-    page.route("**/*clerk.accounts.dev/**", handle_route)
-
-
-def _raise_for_sign_up_result(result: dict, *, email: str) -> None:
-    if result.get("status") == "error" or result.get("code"):
-        code = str(result.get("code", "signup_failed"))
-        message = str(result.get("message", "Sign-up failed"))
-        if code == "captcha_invalid":
-            raise ClerkLoginError(
-                "Automatic MacroPulse sign-up blocked by Clerk CAPTCHA in headless mode. "
-                "Add CLERK_SECRET_KEY to Coolify (Clerk Dashboard → API Keys for the MacroPulse "
-                "instance) so the scraper can create the account server-side, or register once at "
-                f"{SIGN_UP_URL} with {email} and your PULSE_EMAIL_PASSWORD, then re-run sync."
-            )
-        raise ClerkLoginError(f"Automatic MacroPulse sign-up failed ({code}): {message}")
-
-    status = str(result.get("status", ""))
-    if status in {"complete", "missing_requirements"}:
-        return
-
-    raise ClerkLoginError(
-        f"Automatic MacroPulse sign-up returned unexpected status '{status}' for {email}."
+def _registration_required_error(*, email: str, password: str) -> ClerkLoginError:
+    return ClerkLoginError(
+        "No MacroPulse account exists yet for the disposable email below. "
+        "Automatic sign-up is not possible without MacroPulse Clerk API keys.\n\n"
+        f"1. Open {SIGN_UP_URL} in your browser\n"
+        f"2. Register with email: {email}\n"
+        f"3. Use password: {password}\n"
+        "4. Add to Coolify env (so the same inbox is reused):\n"
+        f"   PULSE_EMAIL={email}\n"
+        f"   PULSE_EMAIL_PASSWORD={password}\n"
+        "5. Re-run sync — MFA codes will be read from the mail.tm inbox automatically.\n\n"
+        "Or set CLERK_SESSION from browser cookies after logging in manually."
     )
-
-
-def _attempt_frontend_sign_up(page: Page, *, email: str, password: str) -> dict:
-    _install_clerk_testing_token_route(page)
-    result = _evaluate_clerk(page, CLERK_SIGN_UP_JS, {"email": email, "password": password})
-    _raise_for_sign_up_result(result, email=email)
-    return result
-
-
-def _ensure_macro_pulse_account(page: Page, *, email: str, password: str, timeout_ms: int) -> dict | None:
-    from scraper.clerk_backend import ensure_user_sign_in_ticket
-
-    ticket = ensure_user_sign_in_ticket(email, password)
-    if ticket:
-        return _clerk_ticket_sign_in(page, ticket=ticket)
-
-    sign_up = _attempt_frontend_sign_up(page, email=email, password=password)
-    if sign_up.get("status") == "complete":
-        return sign_up
-
-    verification_code = _fetch_email_code_from_inbox(email)
-    return _clerk_verify_sign_up(page, email_code=verification_code)
 
 
 def _complete_auth_result(
@@ -455,19 +360,19 @@ def login_and_save_session(
     with sync_playwright() as playwright:
         browser, context = _launch_browser(playwright, headless=headless)
         page = context.new_page()
-        _install_clerk_testing_token_route(page)
 
         try:
             page.goto(sign_in_url, wait_until="load", timeout=timeout_ms)
             _wait_for_clerk(page, timeout_ms)
 
-            ticket = None
-            try:
-                from scraper.clerk_backend import ensure_user_sign_in_ticket
+            from scraper.clerk_backend import clerk_secret_key, ensure_user_sign_in_ticket
 
-                ticket = ensure_user_sign_in_ticket(email, password)
-            except RuntimeError as exc:
-                raise ClerkLoginError(str(exc)) from exc
+            ticket = None
+            if clerk_secret_key():
+                try:
+                    ticket = ensure_user_sign_in_ticket(email, password)
+                except RuntimeError as exc:
+                    raise ClerkLoginError(str(exc)) from exc
 
             if ticket:
                 result = _clerk_ticket_sign_in(page, ticket=ticket)
@@ -475,18 +380,7 @@ def login_and_save_session(
                 result = _clerk_sign_in_phase1(page, email=email, password=password)
 
                 if result.get("code") == "form_identifier_not_found":
-                    created = _ensure_macro_pulse_account(
-                        page,
-                        email=email,
-                        password=password,
-                        timeout_ms=timeout_ms,
-                    )
-                    if created and created.get("status") == "complete":
-                        result = created
-                    else:
-                        page.goto(sign_in_url, wait_until="load", timeout=timeout_ms)
-                        _wait_for_clerk(page, timeout_ms)
-                        result = _clerk_sign_in_phase1(page, email=email, password=password)
+                    raise _registration_required_error(email=email, password=password)
 
                 result = _complete_auth_result(
                     page,

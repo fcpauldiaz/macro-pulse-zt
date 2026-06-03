@@ -66,24 +66,26 @@ def _apply_inbox_env(credentials: MailTmCredentials) -> None:
 
 
 def load_saved_inbox_credentials() -> MailTmCredentials | None:
-    turso_credentials = _load_inbox_from_turso()
-    if turso_credentials:
-        return turso_credentials
-
     path = inbox_credentials_path()
-    if not path.exists():
-        return None
+    if path.exists():
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            address = str(raw.get("address", "")).strip()
+            password = str(raw.get("password", "")).strip()
+            if address and password:
+                return MailTmCredentials(address=address, password=password)
 
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        return None
+    return _load_inbox_from_turso()
 
-    address = str(raw.get("address", "")).strip()
-    password = str(raw.get("password", "")).strip()
-    if not address or not password:
-        return None
 
-    return MailTmCredentials(address=address, password=password)
+PULSE_AUTH_INBOX_DDL = """
+CREATE TABLE IF NOT EXISTS pulse_auth_inbox (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  address TEXT NOT NULL,
+  password TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
 
 
 def _load_inbox_from_turso() -> MailTmCredentials | None:
@@ -96,6 +98,7 @@ def _load_inbox_from_turso() -> MailTmCredentials | None:
         client = create_client()
         try:
             init_schema(client)
+            client.execute(PULSE_AUTH_INBOX_DDL)
             result = client.execute("SELECT address, password FROM pulse_auth_inbox WHERE id = 1")
             rows = result.rows or []
             if not rows:
@@ -135,6 +138,7 @@ def _save_inbox_to_turso(credentials: MailTmCredentials) -> None:
         client = create_client()
         try:
             init_schema(client)
+            client.execute(PULSE_AUTH_INBOX_DDL)
             client.execute(
                 """
                 INSERT INTO pulse_auth_inbox (id, address, password, created_at)
@@ -161,7 +165,7 @@ def _resolve_account_password() -> str | None:
 
 
 def ensure_inbox_credentials(*, prefix: str = "macro-pulse") -> MailTmCredentials:
-    """Resolve inbox credentials from env, saved file, or auto-provision mail.tm."""
+    """Resolve inbox credentials from env, saved file, Turso, or auto-provision mail.tm."""
     email = os.environ.get("PULSE_EMAIL", "").strip()
     inbox_password = os.environ.get("PULSE_EMAIL_PASSWORD", "").strip()
     account_password = _resolve_account_password()
@@ -169,21 +173,32 @@ def ensure_inbox_credentials(*, prefix: str = "macro-pulse") -> MailTmCredential
     if email and inbox_password:
         return MailTmCredentials(address=email, password=inbox_password)
 
+    if email and account_password:
+        credentials = MailTmCredentials(address=email, password=account_password)
+        save_inbox_credentials(credentials)
+        _apply_inbox_env(credentials)
+        return credentials
+
     saved = load_saved_inbox_credentials()
     if saved:
         _apply_inbox_env(saved)
-        _save_inbox_to_turso(saved)
+        save_inbox_credentials(saved)
         return saved
+
+    if not account_password:
+        raise ValueError(
+            "Set PULSE_EMAIL_PASSWORD in Coolify (same password for mail.tm inbox and MacroPulse login)."
+        )
 
     credentials = provision_mail_tm_inbox(prefix=prefix, password=account_password)
     save_inbox_credentials(credentials)
     _apply_inbox_env(credentials)
     print(
-        "Created disposable inbox for Clerk MFA:\n"
+        "Created disposable inbox:\n"
         f"  PULSE_EMAIL={credentials.address}\n"
         f"  PULSE_EMAIL_PASSWORD={credentials.password}\n"
-        f"  saved to Turso and {inbox_credentials_path()}\n"
-        "MacroPulse account will be created automatically on first sync."
+        f"  saved to {inbox_credentials_path()}\n"
+        "Add both values to Coolify env so they persist across container restarts."
     )
     return credentials
 
