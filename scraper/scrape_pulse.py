@@ -159,21 +159,21 @@ def _resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
 
     from scraper.auth import resolve_login_credentials
 
-    password = args.password or os.getenv("PULSE_PASSWORD", "")
+    password = (
+        args.password
+        or os.getenv("PULSE_EMAIL_PASSWORD", "").strip()
+        or os.getenv("PULSE_PASSWORD", "")
+    )
     if args.email:
         os.environ["PULSE_EMAIL"] = args.email
-
-    if not password:
-        raise ClerkLoginError(
-            "Missing credentials. Set PULSE_PASSWORD or pass --password "
-            "(PULSE_EMAIL is created automatically when omitted)."
-        )
+    if password:
+        os.environ["PULSE_EMAIL_PASSWORD"] = password
 
     if args.email:
         from scraper.disposable_inbox import ensure_inbox_credentials
 
-        ensure_inbox_credentials()
-        return args.email, password
+        inbox = ensure_inbox_credentials()
+        return args.email, inbox.password
 
     return resolve_login_credentials()
 

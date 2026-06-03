@@ -42,3 +42,10 @@ CREATE TABLE IF NOT EXISTS trade_positions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_trade_positions_status ON trade_positions(status, signal_type);
+
+CREATE TABLE IF NOT EXISTS pulse_auth_inbox (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  address TEXT NOT NULL,
+  password TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
