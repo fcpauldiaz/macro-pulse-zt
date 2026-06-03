@@ -8,13 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from scraper.clerk_login import (
-    DEFAULT_SESSION_PATH,
-    ClerkLoginError,
-    load_session_cookies,
-    login_and_save_session,
-)
-from scraper.turso_store import SyncResult, TursoStoreError, sync_ready_to_buy_signals
+from scraper.turso_store import TursoStoreError, sync_ready_to_buy_signals
 from scraper.pulse_client import (
     PulseClient,
     PulseDataError,
@@ -23,6 +17,8 @@ from scraper.pulse_client import (
     fetch_pulse_data,
     get_regime,
 )
+
+DEFAULT_SESSION_PATH = Path(".pulse_session.json")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -159,6 +155,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
+    from scraper.clerk_login import ClerkLoginError
+
     import os
 
     email = args.email or os.getenv("PULSE_EMAIL", "")
@@ -173,6 +171,8 @@ def _resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
 
 
 def _ensure_session(args: argparse.Namespace) -> dict[str, str]:
+    from scraper.clerk_login import load_session_cookies, login_and_save_session
+
     if args.refresh_login:
         email, password = _resolve_credentials(args)
         return login_and_save_session(
@@ -201,6 +201,8 @@ def _cmd_data(args: argparse.Namespace) -> int:
 
 
 def _cmd_login(args: argparse.Namespace) -> int:
+    from scraper.clerk_login import login_and_save_session
+
     email, password = _resolve_credentials(args)
     cookies = login_and_save_session(
         email=email,
@@ -348,9 +350,19 @@ def main() -> int:
             return _cmd_signals(args)
         if args.command == "sync":
             return _cmd_sync(args)
-    except (PulseDataError, ClerkLoginError, TursoStoreError) as exc:
+    except PulseDataError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    except TursoStoreError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        from scraper.clerk_login import ClerkLoginError
+
+        if isinstance(exc, ClerkLoginError):
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        raise
 
     print(f"Unknown command: {args.command}", file=sys.stderr)
     return 1
