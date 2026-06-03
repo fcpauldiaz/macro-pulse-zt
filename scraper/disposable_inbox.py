@@ -66,6 +66,10 @@ def _apply_inbox_env(credentials: MailTmCredentials) -> None:
 
 
 def load_saved_inbox_credentials() -> MailTmCredentials | None:
+    turso_credentials = _load_inbox_from_turso()
+    if turso_credentials:
+        return turso_credentials
+
     path = inbox_credentials_path()
     if not path.exists():
         return None
@@ -82,6 +86,32 @@ def load_saved_inbox_credentials() -> MailTmCredentials | None:
     return MailTmCredentials(address=address, password=password)
 
 
+def _load_inbox_from_turso() -> MailTmCredentials | None:
+    if not os.environ.get("TURSO_DATABASE_URL", "").strip():
+        return None
+
+    try:
+        from scraper.turso_store import create_client, init_schema
+
+        client = create_client()
+        try:
+            init_schema(client)
+            result = client.execute("SELECT address, password FROM pulse_auth_inbox WHERE id = 1")
+            rows = result.rows or []
+            if not rows:
+                return None
+            row = rows[0]
+            address = str(row[0]).strip()
+            password = str(row[1]).strip()
+            if not address or not password:
+                return None
+            return MailTmCredentials(address=address, password=password)
+        finally:
+            client.close()
+    except Exception:
+        return None
+
+
 def save_inbox_credentials(credentials: MailTmCredentials) -> None:
     path = inbox_credentials_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,6 +122,34 @@ def save_inbox_credentials(credentials: MailTmCredentials) -> None:
         ),
         encoding="utf-8",
     )
+    _save_inbox_to_turso(credentials)
+
+
+def _save_inbox_to_turso(credentials: MailTmCredentials) -> None:
+    if not os.environ.get("TURSO_DATABASE_URL", "").strip():
+        return
+
+    try:
+        from scraper.turso_store import create_client, init_schema
+
+        client = create_client()
+        try:
+            init_schema(client)
+            client.execute(
+                """
+                INSERT INTO pulse_auth_inbox (id, address, password, created_at)
+                VALUES (1, ?, ?, datetime('now'))
+                ON CONFLICT(id) DO UPDATE SET
+                  address = excluded.address,
+                  password = excluded.password,
+                  created_at = excluded.created_at
+                """,
+                [credentials.address, credentials.password],
+            )
+        finally:
+            client.close()
+    except Exception:
+        return
 
 
 def ensure_inbox_credentials(*, prefix: str = "macro-pulse") -> MailTmCredentials:
@@ -105,6 +163,7 @@ def ensure_inbox_credentials(*, prefix: str = "macro-pulse") -> MailTmCredential
     saved = load_saved_inbox_credentials()
     if saved:
         _apply_inbox_env(saved)
+        _save_inbox_to_turso(saved)
         return saved
 
     credentials = provision_mail_tm_inbox(prefix=prefix)
@@ -113,8 +172,9 @@ def ensure_inbox_credentials(*, prefix: str = "macro-pulse") -> MailTmCredential
     print(
         "Created disposable inbox for Clerk MFA:\n"
         f"  PULSE_EMAIL={credentials.address}\n"
-        f"  saved to {inbox_credentials_path()}\n"
-        "Register this address on MacroPulse if you have not already."
+        f"  saved to Turso and {inbox_credentials_path()}\n"
+        "Register this email at https://macro-wrap.vercel.app/sign-up with PULSE_PASSWORD "
+        "before the next sync."
     )
     return credentials
 
