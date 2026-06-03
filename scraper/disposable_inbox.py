@@ -68,6 +68,10 @@ def smtp_key() -> str:
     return os.environ.get("SMTP_KEY", "").strip()
 
 
+def _mail_td_headers(api_key: str) -> dict[str, str]:
+    return {"X-API-KEY": api_key}
+
+
 def load_saved_inbox_credentials() -> InboxCredentials | None:
     path = inbox_credentials_path()
     if path.exists():
@@ -221,7 +225,7 @@ def _resolve_mail_td_account_id(credentials: InboxCredentials) -> InboxCredentia
 
     payload = _http_json(
         f"{MAIL_TD_API}/api/user/accounts",
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=_mail_td_headers(api_key),
     )
     if not isinstance(payload, dict):
         return credentials
@@ -353,7 +357,7 @@ def create_inbox_for_email(email: str) -> DisposableInbox:
 
     raise ValueError(
         f"No inbox API configured for '{email}'. "
-        "Set SMTP_KEY (mail.td Pro API token) and run sync to auto-provision an inbox."
+        "Set SMTP_KEY (temp email API key) and run sync to auto-provision an inbox."
     )
 
 
@@ -365,7 +369,7 @@ def provision_mail_td_inbox(*, prefix: str = "macro-pulse", api_key: str) -> Inb
         f"{MAIL_TD_API}/api/accounts",
         method="POST",
         data={"address": address, "password": password},
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=_mail_td_headers(api_key),
     )
     if not isinstance(payload, dict) or not payload.get("id") or not payload.get("address"):
         raise RuntimeError("mail.td inbox creation failed")
@@ -428,7 +432,7 @@ class MailTdInbox(DisposableInbox):
         self.api_key = api_key
 
     def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_key}"}
+        return _mail_td_headers(self.api_key)
 
     def _fetch_messages(self) -> list[InboxMessage]:
         payload = _http_json(

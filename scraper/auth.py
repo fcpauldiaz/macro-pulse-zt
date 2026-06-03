@@ -35,7 +35,7 @@ def resolve_login_credentials() -> tuple[str, str]:
     if not inbox.password:
         raise PulseDataError(
             "Pulse API requires authentication. Set CLERK_SESSION, PULSE_SESSION_PATH, "
-            "or SMTP_KEY (mail.td Pro API token for temp email + MacroPulse login)."
+            "or SMTP_KEY (temp email API key for inbox provisioning and MacroPulse login)."
         )
 
     return inbox.address, inbox.password
