@@ -29,7 +29,6 @@ from scraper.mail_tm_browser import (
 BASE_URL = "https://macro-wrap.vercel.app"
 SIGN_IN_PATH = "/sign-in"
 PULSE_PATH = "/pulse"
-SIGN_UP_URL = "https://macro-wrap.vercel.app/sign-up"
 
 CLERK_SIGN_IN_JS = """async ({ email, password }) => {
   try {
@@ -132,6 +131,74 @@ CLERK_TICKET_SIGN_IN_JS = """async ({ ticket }) => {
   }
 }"""
 
+CLERK_SIGN_UP_JS = """async ({ email, password }) => {
+  try {
+    const signUp = await window.Clerk.client.signUp.create({
+      emailAddress: email,
+      password,
+    });
+
+    if (signUp.status === 'complete' && signUp.createdSessionId) {
+      await window.Clerk.setActive({ session: signUp.createdSessionId });
+      return { status: 'complete', sessionId: signUp.createdSessionId };
+    }
+
+    const needsEmailVerification =
+      signUp.status === 'missing_requirements' &&
+      (signUp.unverifiedFields ?? []).includes('email_address');
+
+    if (needsEmailVerification) {
+      await signUp.prepareEmailAddressVerification({ strategy: 'email_code' });
+      window.__macroPulsePendingSignUp = signUp;
+      return { status: 'needs_email_code' };
+    }
+
+    return {
+      status: signUp.status,
+      unverifiedFields: signUp.unverifiedFields ?? [],
+      missingFields: signUp.missingFields ?? [],
+    };
+  } catch (err) {
+    const clerkError = err?.errors?.[0];
+    return {
+      status: 'error',
+      code: clerkError?.code ?? 'clerk_error',
+      message: clerkError?.longMessage || clerkError?.message || err?.message || String(err),
+      unverifiedFields: [],
+      missingFields: [],
+    };
+  }
+}"""
+
+CLERK_SIGN_UP_VERIFY_JS = """async ({ emailCode }) => {
+  try {
+    const signUp = window.__macroPulsePendingSignUp;
+    if (!signUp) {
+      return { status: 'error', code: 'missing_sign_up', message: 'No pending Clerk sign-up attempt' };
+    }
+
+    const verified = await signUp.attemptEmailAddressVerification({ code: emailCode });
+    delete window.__macroPulsePendingSignUp;
+
+    if (verified.status === 'complete' && verified.createdSessionId) {
+      await window.Clerk.setActive({ session: verified.createdSessionId });
+      return { status: 'complete', sessionId: verified.createdSessionId };
+    }
+
+    return {
+      status: verified.status,
+      unverifiedFields: verified.unverifiedFields ?? [],
+    };
+  } catch (err) {
+    const clerkError = err?.errors?.[0];
+    return {
+      status: 'error',
+      code: clerkError?.code ?? 'clerk_error',
+      message: clerkError?.longMessage || clerkError?.message || err?.message || String(err),
+    };
+  }
+}"""
+
 
 class StoredCookie(TypedDict, total=False):
     name: str
@@ -193,10 +260,16 @@ def _raise_for_clerk_error(result: dict, *, email: str) -> None:
     code = str(result.get("code", "clerk_error"))
     message = str(result.get("message", "Clerk sign-in failed"))
 
+    if code in {"captcha_invalid", "captcha_not_enabled"}:
+        raise ClerkLoginError(
+            "MacroPulse blocked automatic account creation (CAPTCHA). "
+            "Set CLERK_SECRET_KEY for backend account provisioning."
+        )
+
     if code == "form_identifier_not_found" and email:
         raise ClerkLoginError(
             f"No MacroPulse account exists for {email}. "
-            f"Create one at {SIGN_UP_URL} using the email and password logged on first sync."
+            "Automatic sign-up will be attempted on the next sync."
         )
 
     if code == "form_password_incorrect" and email:
@@ -216,22 +289,64 @@ def _clerk_sign_in_phase1(page: Page, *, email: str, password: str) -> dict:
     return result
 
 
-def _clerk_ticket_sign_in(page: Page, *, ticket: str) -> dict:
-    result = _evaluate_clerk(page, CLERK_TICKET_SIGN_IN_JS, {"ticket": ticket})
+def _clerk_sign_up(page: Page, *, email: str, password: str) -> dict:
+    result = _evaluate_clerk(page, CLERK_SIGN_UP_JS, {"email": email, "password": password})
+    if result.get("status") == "error":
+        _raise_for_clerk_error(result, email=email)
+    return result
+
+
+def _clerk_sign_up_verify(page: Page, *, email_code: str) -> dict:
+    result = _evaluate_clerk(page, CLERK_SIGN_UP_VERIFY_JS, {"emailCode": email_code})
     _raise_for_clerk_error(result, email="")
     return result
 
 
-def _registration_required_error(*, email: str, password: str) -> ClerkLoginError:
-    return ClerkLoginError(
-        "No MacroPulse account exists yet for the disposable email below. "
-        "Automatic sign-up is not possible without MacroPulse Clerk API keys.\n\n"
-        f"1. Open {SIGN_UP_URL} in your browser\n"
-        f"2. Register with email: {email}\n"
-        f"3. Use password: {password}\n"
-        "4. Re-run sync — MFA codes will be read from https://mail.tm/en/ automatically.\n\n"
-        "The inbox is saved to .pulse_inbox.json (and Turso when configured)."
+def _complete_sign_up_result(
+    page: Page,
+    result: dict,
+    *,
+    email: str,
+    email_code: str | None,
+    mail_page: Page,
+) -> dict:
+    if result.get("status") == "needs_email_code":
+        resolved_code = _resolve_email_code(email, email_code)
+        if not resolved_code:
+            resolved_code = _fetch_email_code_from_mail_tm(mail_page)
+        return _clerk_sign_up_verify(page, email_code=resolved_code)
+
+    if result.get("status") != "complete":
+        raise ClerkLoginError(
+            "MacroPulse sign-up did not complete "
+            f"(status={result.get('status')}, missing={result.get('missingFields')})."
+        )
+
+    return result
+
+
+def _attempt_auto_sign_up(
+    page: Page,
+    mail_page: Page,
+    *,
+    email: str,
+    password: str,
+    email_code: str | None,
+) -> dict:
+    result = _clerk_sign_up(page, email=email, password=password)
+    return _complete_sign_up_result(
+        page,
+        result,
+        email=email,
+        email_code=email_code,
+        mail_page=mail_page,
     )
+
+
+def _clerk_ticket_sign_in(page: Page, *, ticket: str) -> dict:
+    result = _evaluate_clerk(page, CLERK_TICKET_SIGN_IN_JS, {"ticket": ticket})
+    _raise_for_clerk_error(result, email="")
+    return result
 
 
 def _complete_auth_result(
@@ -353,8 +468,7 @@ def _resolve_mail_tm_credentials(
                 "Created disposable inbox via mail.tm:\n"
                 f"  email: {credentials.address}\n"
                 f"  password: {credentials.password}\n"
-                f"  saved to {inbox_credentials_path()}\n"
-                "Register this account at https://macro-wrap.vercel.app/sign-up, then re-run sync."
+                f"  saved to {inbox_credentials_path()}"
             )
 
     return credentials
@@ -414,18 +528,21 @@ def login_and_get_cookies(
                 )
 
                 if result.get("code") == "form_identifier_not_found":
-                    raise _registration_required_error(
+                    result = _attempt_auto_sign_up(
+                        page,
+                        mail_page,
                         email=resolved_email,
                         password=resolved_password,
+                        email_code=email_code,
                     )
-
-                result = _complete_auth_result(
-                    page,
-                    result,
-                    email=resolved_email,
-                    email_code=email_code,
-                    mail_page=mail_page,
-                )
+                else:
+                    result = _complete_auth_result(
+                        page,
+                        result,
+                        email=resolved_email,
+                        email_code=email_code,
+                        mail_page=mail_page,
+                    )
 
             if result.get("status") != "complete":
                 raise ClerkLoginError(
