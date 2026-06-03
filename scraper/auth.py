@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from scraper.errors import ClerkLoginError, PulseDataError
+from scraper.errors import PulseDataError
 
 
 def session_path() -> Path:
@@ -16,32 +16,23 @@ def resolve_cookies() -> dict[str, str]:
         return {"__session": clerk_session}
 
     path = session_path()
-    if path.exists():
-        from scraper.clerk_login import load_session_cookies
+    if not path.exists():
+        return {}
 
-        return load_session_cookies(path)
+    from scraper.clerk_login import load_session_cookies
 
-    return {}
+    return load_session_cookies(path)
 
 
-def ensure_cookies(*, base_url: str) -> dict[str, str]:
+def require_session_cookies(*, base_url: str) -> dict[str, str]:
     cookies = resolve_cookies()
     if cookies:
         return cookies
 
-    email = os.getenv("PULSE_EMAIL", "").strip()
-    password = os.getenv("PULSE_PASSWORD", "")
-    if not email or not password:
-        raise PulseDataError(
-            "Pulse API requires authentication. Set CLERK_SESSION, PULSE_SESSION_PATH, "
-            "or PULSE_EMAIL and PULSE_PASSWORD."
-        )
-
-    from scraper.clerk_login import login_and_save_session
-
-    return login_and_save_session(
-        email=email,
-        password=password,
-        session_path=session_path(),
-        base_url=base_url,
+    raise PulseDataError(
+        "Pulse API requires a Clerk session cookie. The public endpoint is now protected.\n"
+        "Set CLERK_SESSION to your __session cookie value from macro-wrap.vercel.app "
+        "(DevTools → Application → Cookies), or mount PULSE_SESSION_PATH with a saved "
+        "session JSON file.\n"
+        "Playwright login is not used in the scheduled sync task."
     )

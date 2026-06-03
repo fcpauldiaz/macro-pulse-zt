@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from scraper.auth import ensure_cookies
+from scraper.auth import require_session_cookies
 from scraper.errors import TursoStoreError
 from scraper.pulse_client import (
     BASE_URL,
@@ -258,7 +258,7 @@ def sync_ready_to_buy_signals(
 ) -> SyncResult:
     target_date = snapshot_date or _today()
     if data is None:
-        cookies = ensure_cookies(base_url=BASE_URL)
+        cookies = require_session_cookies(base_url=BASE_URL)
         payload = fetch_pulse_data(base_url=BASE_URL, cookies=cookies)
     else:
         payload = data
