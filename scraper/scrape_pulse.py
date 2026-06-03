@@ -66,6 +66,22 @@ def _parse_args() -> argparse.Namespace:
         help="Run browser in headed mode for debugging",
     )
 
+    setup_email_parser = subparsers.add_parser(
+        "setup-email",
+        help="Create a disposable mail.tm inbox for Clerk MFA (recommended for servers)",
+    )
+    setup_email_parser.add_argument(
+        "--prefix",
+        default="macro-pulse",
+        help="Local part prefix for the generated address",
+    )
+    setup_email_parser.add_argument(
+        "--provider",
+        choices=("mailtm", "tempmail"),
+        default="mailtm",
+        help="Disposable email provider (mailtm recommended; tempmail inboxes expire quickly)",
+    )
+
     charts_parser = subparsers.add_parser(
         "charts",
         help="Fetch authenticated /api/pulse/chart data for signal symbols",
@@ -213,6 +229,26 @@ def _cmd_login(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_setup_email(args: argparse.Namespace) -> int:
+    from scraper.disposable_inbox import provision_mail_tm_inbox, provision_tempmail_inbox
+
+    if args.provider == "tempmail":
+        credentials = provision_tempmail_inbox(prefix=args.prefix)
+        print("Created tempmail.lol inbox (free tier expires in ~1 hour):")
+        print(f"PULSE_EMAIL={credentials.address}")
+        print(f"PULSE_EMAIL_TOKEN={credentials.token}")
+        print("Register this address on MacroPulse, then run login/sync.")
+        return 0
+
+    credentials = provision_mail_tm_inbox(prefix=args.prefix)
+    print("Created mail.tm inbox (recommended for Coolify/cron):")
+    print(f"PULSE_EMAIL={credentials.address}")
+    print(f"PULSE_EMAIL_PASSWORD={credentials.password}")
+    print("1. Register this address on MacroPulse and set your account password as PULSE_PASSWORD")
+    print("2. Run: python -m scraper.scrape_pulse login")
+    return 0
+
+
 def _fetch_charts(args: argparse.Namespace) -> tuple[dict, list[dict]]:
     cookies = _ensure_session(args)
     client = PulseClient(base_url=args.base_url, cookies=cookies)
@@ -340,6 +376,8 @@ def main() -> int:
             return _cmd_data(args)
         if args.command == "login":
             return _cmd_login(args)
+        if args.command == "setup-email":
+            return _cmd_setup_email(args)
         if args.command == "charts":
             return _cmd_charts(args)
         if args.command == "all":
