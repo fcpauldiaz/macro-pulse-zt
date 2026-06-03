@@ -10,6 +10,7 @@ import secrets
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -50,6 +51,72 @@ class InboxMessage:
 class MailTmCredentials:
     address: str
     password: str
+
+
+DEFAULT_INBOX_PATH = Path(".pulse_inbox.json")
+
+
+def inbox_credentials_path() -> Path:
+    return Path(os.environ.get("PULSE_INBOX_PATH", str(DEFAULT_INBOX_PATH)))
+
+
+def _apply_inbox_env(credentials: MailTmCredentials) -> None:
+    os.environ["PULSE_EMAIL"] = credentials.address
+    os.environ["PULSE_EMAIL_PASSWORD"] = credentials.password
+
+
+def load_saved_inbox_credentials() -> MailTmCredentials | None:
+    path = inbox_credentials_path()
+    if not path.exists():
+        return None
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return None
+
+    address = str(raw.get("address", "")).strip()
+    password = str(raw.get("password", "")).strip()
+    if not address or not password:
+        return None
+
+    return MailTmCredentials(address=address, password=password)
+
+
+def save_inbox_credentials(credentials: MailTmCredentials) -> None:
+    path = inbox_credentials_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"address": credentials.address, "password": credentials.password},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def ensure_inbox_credentials(*, prefix: str = "macro-pulse") -> MailTmCredentials:
+    """Resolve inbox credentials from env, saved file, or auto-provision mail.tm."""
+    email = os.environ.get("PULSE_EMAIL", "").strip()
+    inbox_password = os.environ.get("PULSE_EMAIL_PASSWORD", "").strip()
+
+    if email and inbox_password:
+        return MailTmCredentials(address=email, password=inbox_password)
+
+    saved = load_saved_inbox_credentials()
+    if saved:
+        _apply_inbox_env(saved)
+        return saved
+
+    credentials = provision_mail_tm_inbox(prefix=prefix)
+    save_inbox_credentials(credentials)
+    _apply_inbox_env(credentials)
+    print(
+        "Created disposable inbox for Clerk MFA:\n"
+        f"  PULSE_EMAIL={credentials.address}\n"
+        f"  saved to {inbox_credentials_path()}\n"
+        "Register this address on MacroPulse if you have not already."
+    )
+    return credentials
 
 
 @dataclass(frozen=True)
@@ -131,9 +198,8 @@ def create_inbox_for_email(email: str) -> DisposableInbox:
 
     raise ValueError(
         f"No inbox API configured for '{email}'. "
-        "Recommended: run `python -m scraper.scrape_pulse setup-email` to create a mail.tm "
-        "address, register it on MacroPulse, then set PULSE_EMAIL and PULSE_EMAIL_PASSWORD. "
-        "Alternatives: PULSE_EMAIL_TOKEN for tempmail.lol, or guerrillamail/1secmail domains."
+        "Set PULSE_EMAIL_PASSWORD, run sync/login to auto-create a mail.tm inbox, "
+        "or set PULSE_EMAIL_TOKEN for tempmail.lol."
     )
 
 

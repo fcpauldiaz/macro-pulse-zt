@@ -24,18 +24,26 @@ def resolve_cookies() -> dict[str, str]:
     return load_session_cookies(path)
 
 
+def resolve_login_credentials() -> tuple[str, str]:
+    pulse_password = os.getenv("PULSE_PASSWORD", "")
+    if not pulse_password:
+        raise PulseDataError(
+            "Pulse API requires authentication. Set CLERK_SESSION, PULSE_SESSION_PATH, "
+            "or PULSE_PASSWORD (disposable inbox email is created automatically on sync/login)."
+        )
+
+    from scraper.disposable_inbox import ensure_inbox_credentials
+
+    inbox = ensure_inbox_credentials()
+    return inbox.address, pulse_password
+
+
 def ensure_cookies(*, base_url: str) -> dict[str, str]:
     cookies = resolve_cookies()
     if cookies:
         return cookies
 
-    email = os.getenv("PULSE_EMAIL", "").strip()
-    password = os.getenv("PULSE_PASSWORD", "")
-    if not email or not password:
-        raise PulseDataError(
-            "Pulse API requires authentication. Set CLERK_SESSION, PULSE_SESSION_PATH, "
-            "or PULSE_EMAIL and PULSE_PASSWORD."
-        )
+    email, password = resolve_login_credentials()
 
     from scraper.clerk_login import login_and_save_session
 
