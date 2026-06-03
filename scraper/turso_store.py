@@ -6,9 +6,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import libsql_client
-
+from scraper.auth import ensure_cookies
+from scraper.errors import TursoStoreError
 from scraper.pulse_client import (
+    BASE_URL,
     PulseData,
     extract_momentum_rows,
     extract_quant_score_rows,
@@ -16,11 +17,9 @@ from scraper.pulse_client import (
     get_regime,
 )
 
+import libsql_client
+
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "db" / "schema.sql"
-
-
-class TursoStoreError(Exception):
-    pass
 
 
 @dataclass(frozen=True)
@@ -258,7 +257,11 @@ def sync_ready_to_buy_signals(
     client: libsql_client.Client | None = None,
 ) -> SyncResult:
     target_date = snapshot_date or _today()
-    payload = data or fetch_pulse_data()
+    if data is None:
+        cookies = ensure_cookies(base_url=BASE_URL)
+        payload = fetch_pulse_data(base_url=BASE_URL, cookies=cookies)
+    else:
+        payload = data
     regime = get_regime(payload)
     pulse_updated_at = payload.get("updatedAt")
 

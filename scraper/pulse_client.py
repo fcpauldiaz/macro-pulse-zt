@@ -35,8 +35,7 @@ REQUIRED_TOP_LEVEL_KEYS = frozenset(
 )
 
 
-class PulseDataError(Exception):
-    pass
+from scraper.errors import PulseDataError
 
 
 class CurrentRegime(TypedDict, total=False):
@@ -227,14 +226,24 @@ def fetch_pulse_data(
     base_url: str = BASE_URL,
     timeout: float = 30.0,
     client: httpx.Client | None = None,
+    cookies: dict[str, str] | None = None,
 ) -> PulseData:
     url = f"{base_url.rstrip('/')}{PULSE_DATA_PATH}"
 
     if client is None:
-        with httpx.Client(timeout=timeout, follow_redirects=True) as session:
+        with httpx.Client(
+            timeout=timeout,
+            follow_redirects=True,
+            cookies=cookies or {},
+        ) as session:
             response = session.get(url)
     else:
         response = client.get(url)
+
+    if response.status_code in (401, 403):
+        raise PulseDataError(
+            "Unauthorized fetching /api/pulse/data; Clerk session required or expired"
+        )
 
     response.raise_for_status()
     payload = response.json()

@@ -25,8 +25,7 @@ class StoredCookie(TypedDict, total=False):
     sameSite: str
 
 
-class ClerkLoginError(Exception):
-    pass
+from scraper.errors import ClerkLoginError
 
 
 def _sign_in_url(*, redirect_path: str = PULSE_PATH, base_url: str = BASE_URL) -> str:

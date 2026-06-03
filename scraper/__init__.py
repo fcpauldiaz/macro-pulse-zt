@@ -1,11 +1,11 @@
+from scraper.errors import ClerkLoginError, PulseDataError, TursoStoreError
 from scraper.pulse_client import (
     PulseClient,
-    PulseDataError,
     extract_signal_table,
     fetch_pulse_data,
     get_regime,
 )
-from scraper.turso_store import SyncResult, TursoStoreError, sync_ready_to_buy_signals
+from scraper.turso_store import SyncResult, sync_ready_to_buy_signals
 
 __all__ = [
     "PulseClient",
@@ -13,6 +13,7 @@ __all__ = [
     "extract_signal_table",
     "fetch_pulse_data",
     "get_regime",
+    "ClerkLoginError",
     "SyncResult",
     "TursoStoreError",
     "sync_ready_to_buy_signals",

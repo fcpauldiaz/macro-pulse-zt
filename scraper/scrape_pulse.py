@@ -8,10 +8,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from scraper.turso_store import TursoStoreError, sync_ready_to_buy_signals
+from scraper.errors import ClerkLoginError, PulseDataError, TursoStoreError
+from scraper.turso_store import sync_ready_to_buy_signals
 from scraper.pulse_client import (
     PulseClient,
-    PulseDataError,
     extract_signal_table,
     extract_symbols,
     fetch_pulse_data,
@@ -155,8 +155,6 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_credentials(args: argparse.Namespace) -> tuple[str, str]:
-    from scraper.clerk_login import ClerkLoginError
-
     import os
 
     email = args.email or os.getenv("PULSE_EMAIL", "")
@@ -356,13 +354,9 @@ def main() -> int:
     except TursoStoreError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    except Exception as exc:
-        from scraper.clerk_login import ClerkLoginError
-
-        if isinstance(exc, ClerkLoginError):
-            print(f"Error: {exc}", file=sys.stderr)
-            return 1
-        raise
+    except ClerkLoginError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     print(f"Unknown command: {args.command}", file=sys.stderr)
     return 1
