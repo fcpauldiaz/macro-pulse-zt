@@ -13,4 +13,4 @@ fi
 
 : "${TURSO_DATABASE_URL:?Set TURSO_DATABASE_URL in the environment or .env}"
 
-PYTHONPATH="$ROOT" python3 -m scraper.scrape_pulse sync
+PYTHONPATH="$ROOT" python -m scraper.scrape_pulse sync
