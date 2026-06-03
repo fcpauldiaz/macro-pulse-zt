@@ -1,4 +1,3 @@
-# Scraper image (Coolify scheduled task)
 .git
 .venv
 venv
@@ -6,8 +5,10 @@ __pycache__
 *.pyc
 local.db
 output
-dashboard
 .pulse_session.json
 .env
 .env.*
 !.env.example
+dashboard/node_modules
+dashboard/.next
+npm-debug.log*
