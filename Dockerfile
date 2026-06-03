@@ -20,14 +20,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
-    HOSTNAME=0.0.0.0 \
-    SYNC_CRON_SCHEDULE="0 13 * * *" \
-    RUN_SYNC_ON_START=true
+    HOSTNAME=0.0.0.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       bash \
-      cron \
       python3 \
       python3-pip \
     && rm -rf /var/lib/apt/lists/*
@@ -37,8 +34,8 @@ RUN pip3 install --no-cache-dir -r requirements-scraper.txt --break-system-packa
 
 COPY scraper/ ./scraper/
 COPY db/ ./db/
-COPY scripts/ ./scripts/
-RUN chmod +x ./scripts/daily-sync.sh ./scripts/docker-entrypoint.sh
+COPY scripts/daily-sync.sh ./scripts/daily-sync.sh
+RUN chmod +x ./scripts/daily-sync.sh
 
 COPY --from=dashboard-builder /dashboard/public ./dashboard/public
 COPY --from=dashboard-builder /dashboard/.next/standalone ./dashboard
@@ -46,4 +43,4 @@ COPY --from=dashboard-builder /dashboard/.next/static ./dashboard/.next/static
 
 EXPOSE 3000
 
-CMD ["/bin/bash", "./scripts/docker-entrypoint.sh"]
+CMD ["node", "dashboard/server.js"]
