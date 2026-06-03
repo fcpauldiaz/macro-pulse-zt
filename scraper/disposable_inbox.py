@@ -152,10 +152,19 @@ def _save_inbox_to_turso(credentials: MailTmCredentials) -> None:
         return
 
 
+def _resolve_account_password() -> str | None:
+    return (
+        os.environ.get("PULSE_EMAIL_PASSWORD", "").strip()
+        or os.environ.get("PULSE_PASSWORD", "").strip()
+        or None
+    )
+
+
 def ensure_inbox_credentials(*, prefix: str = "macro-pulse") -> MailTmCredentials:
     """Resolve inbox credentials from env, saved file, or auto-provision mail.tm."""
     email = os.environ.get("PULSE_EMAIL", "").strip()
     inbox_password = os.environ.get("PULSE_EMAIL_PASSWORD", "").strip()
+    account_password = _resolve_account_password()
 
     if email and inbox_password:
         return MailTmCredentials(address=email, password=inbox_password)
@@ -166,15 +175,15 @@ def ensure_inbox_credentials(*, prefix: str = "macro-pulse") -> MailTmCredential
         _save_inbox_to_turso(saved)
         return saved
 
-    credentials = provision_mail_tm_inbox(prefix=prefix)
+    credentials = provision_mail_tm_inbox(prefix=prefix, password=account_password)
     save_inbox_credentials(credentials)
     _apply_inbox_env(credentials)
     print(
         "Created disposable inbox for Clerk MFA:\n"
         f"  PULSE_EMAIL={credentials.address}\n"
+        f"  PULSE_EMAIL_PASSWORD={credentials.password}\n"
         f"  saved to Turso and {inbox_credentials_path()}\n"
-        "Register this email at https://macro-wrap.vercel.app/sign-up with PULSE_PASSWORD "
-        "before the next sync."
+        "MacroPulse account will be created automatically on first sync."
     )
     return credentials
 
@@ -263,7 +272,7 @@ def create_inbox_for_email(email: str) -> DisposableInbox:
     )
 
 
-def provision_mail_tm_inbox(*, prefix: str = "macro-pulse") -> MailTmCredentials:
+def provision_mail_tm_inbox(*, prefix: str = "macro-pulse", password: str | None = None) -> MailTmCredentials:
     domains_payload = _http_json(f"{MAIL_TM_API}/domains")
     if not isinstance(domains_payload, list) or not domains_payload:
         raise RuntimeError("mail.tm returned no active domains")
@@ -274,14 +283,14 @@ def provision_mail_tm_inbox(*, prefix: str = "macro-pulse") -> MailTmCredentials
 
     domain = str(first_domain["domain"])
     address = f"{prefix}-{int(time.time())}@{domain}"
-    password = secrets.token_urlsafe(18)
+    resolved_password = password.strip() if password and password.strip() else secrets.token_urlsafe(18)
 
     _http_json(
         f"{MAIL_TM_API}/accounts",
         method="POST",
-        data={"address": address, "password": password},
+        data={"address": address, "password": resolved_password},
     )
-    return MailTmCredentials(address=address, password=password)
+    return MailTmCredentials(address=address, password=resolved_password)
 
 
 def provision_tempmail_inbox(*, prefix: str = "macro-pulse") -> TempMailCredentials:
